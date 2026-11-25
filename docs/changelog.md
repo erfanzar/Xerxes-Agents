@@ -7,6 +7,12 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.58 — 2026-11-25
+
+- **Uninterrupted SSH disconnect & app-close survival across all agents.** Hardens the Bun daemon (`cli.ts`, `daemon/server.ts`) to ignore POSIX `SIGHUP` and broken-pipe stderr/stdout errors before binding its socket; unconditionally promotes external ACP turns (`agy acp`, Claude Code, Codex, custom ACP) into daemon-owned session turns; promotes leased turns and pending approvals/questions to session-scoped ownership on lease expiry (preserving clean `turnOwners` release); pins connected ACP bridges, wakeups, pending interactions, AGY background work, and swarms against empty-shell reaping and `runtime.restart_if_idle`; and resolves `session.open`/`initialize` by session ID so mid-turn reconnects receive live streaming, `pending_interactions`, and offline file changes folded from paged history actions.
+- **MemoryGuard external ACP isolation & crash recovery.** Exposes active external ACP subprocess PIDs (`AcpStdioClient`, `ClaudeStreamJsonRunner`, `AcpSpawnedLoginProcess` -> `DaemonAcpBridgeHost.activeProcessPids()`) and excludes them from `MemoryGuard` so heavy external-agent workloads (e.g. TPU/GPU jobs launched under `agy acp`) never trigger `SIGTERM` on `agy` (`code 0`); prevents `DesktopProviderForwarding` from binding local-Mac relays onto live or disconnected/saved external ACP sessions; resumes `savedAcpBinding.external_session_id` on Retry; and auto-reconnects disconnected external ACP sessions on message submit/retry instead of falling back to native Xerxes.
+- **Desktop Thread Details quick-open surfaces.** Adds **Artifacts**, **Terminal**, and **Activity** rows directly underneath **Immortals** by default in the floating `ThreadDetailsCard` for one-click access to all key right-rail surfaces.
+
 ## 0.8.57 — 2026-11-25
 
 - **Zero-loss chronological ACP persistence & late update enrichment.** Replaces flat single-message ACP turn persistence with a chronological multi-step `AcpTurnTranscriptRecorder` across live turns, mid-turn steers, autonomous wakeups, and session replays so long ACP sessions keep answers after tools (never sliced off paginated history) and persist partial work on mid-turn errors/crashes; preserves late post-settlement `tool_call_update` outputs/diffs/locations, retains diffs/metadata/inline thinking across reload hydration, and warns when `session/resume` falls back to a fresh external session.

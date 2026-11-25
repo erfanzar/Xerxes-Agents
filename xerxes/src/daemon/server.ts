@@ -2514,6 +2514,11 @@ export class DaemonServer {
     }
   }
 
+  /** OS PIDs of active external ACP runtimes (`agy`, `claude`, `codex`, custom). */
+  activeAcpProcessPids(): ReadonlySet<number> {
+    return this.acpBridgeHost.activeProcessPids();
+  }
+
   stop(): Promise<void> {
     return this.stopPromise ??= this.stopOnce();
   }
@@ -3099,6 +3104,9 @@ export class DaemonServer {
       const goalSessions = new Set(this.goalWakeDispatches.keys());
       const inUse = (session: DaemonSession): boolean => Boolean(session.activeTurnId || session.status !== 'idle'
         || this.sessionOperations.has(session.sessionKey)
+        || this.turnOwners.has(session.sessionKey)
+        || this.steerContinuations.has(session.sessionKey)
+        || this.hasActiveAcpOrSwarmWork(session)
         // A person's shell idling at its prompt is not work: the update may
         // close it (the Terminal tab reopens one). A command running in it is.
         || (this.terminalRegistry?.list(session.id) ?? []).some(terminal => terminal.running
@@ -3202,7 +3210,15 @@ export class DaemonServer {
     }
     if (method === "session.open") {
       const requestedHistory = historyLimit(params.history_limit);
-      const key = requestedSessionKey(params, "default");
+      const rawKey = requestedSessionKey(params, "default");
+      // A live session created under a client slot key (`desktop-...`, `tui:...`)
+      // may be reopened by its public session id after a disconnect or window
+      // switch. Resolve to its live slot key so reattaching joins the running
+      // turn, live ACP bridge, and pending interactions instead of conflicting.
+      const liveById = this.runtime
+        .listSessions()
+        .find((candidate) => candidate.sessionKey === rawKey || candidate.id === rawKey);
+      const key = liveById?.sessionKey ?? rawKey;
       const activeSession = this.runtime.sessionStatus(
         connection.activeSessionKey,
       );
@@ -3226,6 +3242,7 @@ export class DaemonServer {
       if (preset.broken) return { ok: false, code: "agent-preset-broken", error: preset.broken };
       const session = await this.runtime.openSession(key, preset.id, { cwd, preserveProject: true });
       connection.activeSessionKey = key;
+      this.sessionObservers.add(connection);
       this.recoverMonitorReactions(session);
       await this.rearmGoalAfterRestart(key, connection);
       await this.resumeTurnAfterRestart(key, connection);
@@ -7923,6 +7940,7 @@ export class DaemonServer {
         const working = leaving && (leaving.activeTurnId || this.turnOwners.has(key)
           || subagentSnapshotPanelPayloads(leaving.metadata).some(agent => agent.status === 'running' || agent.status === 'queued')
           || (this.swarmHost.peekManager(leaving.id)?.status().members.some(member => member.role !== 'coordinator' && member.state === 'working') ?? false)
+          || this.hasActiveAcpOrSwarmWork(leaving)
           || (() => { const goal = getGoal(leaving.metadata, leaving.id); return goal?.phase === 'active' && goal.activation === 'armed'; })());
         if (working) {
           const error = "This session is still working (a turn, agents, or an armed goal). Stop or pause it before starting a new one.";
@@ -13233,7 +13251,8 @@ export class DaemonServer {
     // A new connection knows the public task ID, not its original connection
     // key. Reattach live tasks before looking for durable history: untouched
     // tasks intentionally have no transcript, and active work must stay live.
-    const liveSession = resumeId ? this.runtime.listSessions().find(session => session.id === resumeId) : undefined;
+    const liveLookupId = resumeId || (requestedKey && looksLikeSessionId(requestedKey) ? requestedKey : undefined);
+    const liveSession = liveLookupId ? this.runtime.listSessions().find(session => session.id === liveLookupId) : undefined;
     const key = resumeId && attachedSession?.id === resumeId
       ? attachedSession.sessionKey
       : resumeId && previousSession?.id === resumeId
@@ -13279,11 +13298,15 @@ export class DaemonServer {
       // write, a compaction — also hold the queue, and this eviction is meant
       // to proceed during those; the compaction case is guarded where the
       // swap happens.)
-      const busy = (sessionKey: string): boolean =>
-        Boolean(
-          this.runtime.sessionStatus(sessionKey)?.activeTurnId
-          || this.turnOwners.has(sessionKey),
+      const busy = (sessionKey: string): boolean => {
+        const candidate = this.runtime.sessionStatus(sessionKey);
+        return Boolean(
+          candidate?.activeTurnId
+          || this.turnOwners.has(sessionKey)
+          || (candidate && this.acpBridgeHost.hasActiveBridge(candidate.id))
+          || (candidate && this.hasActiveAcpOrSwarmWork(candidate)),
         );
+      };
       if (!busy(key)) {
         // Eviction drops every mutation not yet persisted (idle steers,
         // title and mode edits); flush first so a reconnect cannot silently
@@ -14211,7 +14234,14 @@ export class DaemonServer {
       (refusal as Error & { turnNeverBegan?: boolean }).turnNeverBegan = true;
       return Promise.reject(refusal);
     }
-    if (owner && this.sessionOwnedClients.has(owner)) {
+    // External ACP turns (`agy acp`, Claude Code, Codex, custom ACP) execute in
+    // daemon-owned subprocesses bound to the session, so they always outlive
+    // transport disconnects and app closes just like `session_owned_turns` clients.
+    const activeSessionForOwner = this.runtime.sessionStatus(sessionKey);
+    const externalAcpSession = Boolean(
+      activeSessionForOwner && this.acpBridgeHost.hasActiveBridge(activeSessionForOwner.id),
+    );
+    if (owner && (this.sessionOwnedClients.has(owner) || externalAcpSession)) {
       const original = owner;
       const parentKey = original.activeSessionKey;
       const background = parentKey !== sessionKey;
@@ -14559,17 +14589,72 @@ export class DaemonServer {
     this.disconnectOwner(connection);
   }
 
+  /**
+   * Promote turns and pending approvals/questions owned directly by an expiring
+   * leased client onto session-scoped owners so work keeps running (or waits
+   * patiently for the user to reconnect and answer) instead of cancelling.
+   */
+  private promoteConnectionWorkToSessionOwned(connection: DaemonTransportConnection): void {
+    const promotedByKey = new Map<string, DaemonTransportConnection>();
+    const ownerFor = (key: string): DaemonTransportConnection => {
+      let promoted = promotedByKey.get(key);
+      if (!promoted) {
+        promoted = this.ownerlessInteractionOwner(key);
+        promotedByKey.set(key, promoted);
+      }
+      return promoted;
+    };
+    const keyForPendingInteraction = (requestId: string, kind: "permission" | "question"): string => {
+      const sessionId = kind === "permission"
+        ? this.interactions.pendingPermissionInfo(requestId)?.sessionId
+        : (this.interactions.pendingQuestionInfo(requestId)?.sessionId ?? this.pendingAcpQuestions.get(requestId)?.sessionId);
+      const matched = sessionId
+        ? this.runtime.listSessions().find((candidate) => candidate.id === sessionId)
+        : undefined;
+      return matched?.sessionKey ?? connection.activeSessionKey;
+    };
+    for (const [, owner] of this.turnOwners) {
+      if (owner === connection) {
+        // Keep the original turnOwners entry intact so submitTrackedTurn's
+        // pre-launch guard and completion cleanup stay aligned, while marking
+        // the expired owner as session-scoped so any later approval/question
+        // emitted by the still-running turn can be replayed and answered on
+        // reconnect.
+        this.sessionTurnOwners.add(connection);
+        break;
+      }
+    }
+    for (const [requestId, owner] of this.approvalOwners) {
+      if (owner !== connection) continue;
+      const promoted = ownerFor(keyForPendingInteraction(requestId, "permission"));
+      this.approvalOwners.set(requestId, promoted);
+      const frame = this.pendingInteractionFrames.get(requestId);
+      if (frame && frame.owner === connection) {
+        this.pendingInteractionFrames.set(requestId, { ...frame, owner: promoted });
+      }
+    }
+    for (const [requestId, owner] of this.questionOwners) {
+      if (owner !== connection) continue;
+      const promoted = ownerFor(keyForPendingInteraction(requestId, "question"));
+      this.questionOwners.set(requestId, promoted);
+      const frame = this.pendingInteractionFrames.get(requestId);
+      if (frame && frame.owner === connection) {
+        this.pendingInteractionFrames.set(requestId, { ...frame, owner: promoted });
+      }
+    }
+  }
+
   private disconnectOwner(connection: DaemonTransportConnection, leaseExpired = false): void {
-    // A client that took a connection lease (the desktop app) asked for its
-    // work to outlive its transport. Once the reconnect window has passed,
-    // cancelling here stopped every run the moment a laptop locked long enough
-    // for its SSH link to drop: turns died and armed goals were disarmed, so
-    // a task left running overnight simply stopped. Its turns and goal now
-    // keep running; the client reattaches to the live session when it
-    // returns. A turn waiting on this client's approval or answer cannot
-    // progress without it, so that one is still cancelled.
-    const awaitingOwner = [...this.approvalOwners.values(), ...this.questionOwners.values()].includes(connection);
-    const background = leaseExpired && !awaitingOwner;
+    // A client that took a connection lease (Desktop, VS Code, TUI, Hub) asked
+    // for its work to outlive its transport. Once the reconnect window has
+    // passed — even if a turn is waiting on an approval or question — promote
+    // its turns and pending interactions to session-scoped ownership so every
+    // native turn, ACP agent (`agy acp`, Claude, Codex), goal, and pending
+    // prompt survives SSH drops and app closes, and reattaches on return.
+    const background = leaseExpired;
+    if (background) {
+      this.promoteConnectionWorkToSessionOwned(connection);
+    }
     this.sessionObservers.delete(connection);
     this.providerRelays.disconnect(connection);
     if (!background) this.disconnectedGoalOwners.add(connection);
@@ -14593,15 +14678,12 @@ export class DaemonServer {
     // Exchange-less sessions no client is bound to anymore are empty shells:
     // nothing to resume, nothing to persist (the store skips them), nothing to
     // show. Reap them so dead app launches do not litter active_list — and
-    // the GUI sidebar — with 0-turn ghosts. Sessions with history, sessions
-    // with a live turn, and sessions still pinned by a connected client all
-    // survive. (The disconnecting connection is already out of this.connections.)
-    const attached = new Set(
-      [...this.connections].map((other) => other.activeSessionKey),
-    );
+    // the GUI sidebar — with 0-turn ghosts. Sessions with history or any
+    // pinned live state (connected ACP bridges like `agy acp`/Claude/Codex,
+    // active/pre-launch turns, out-of-turn wakeups, pending interactions,
+    // swarms, terminals, monitors, goals, leased observers) ALL survive.
     for (const session of this.runtime.listSessions()) {
-      if (sessionHasHistory(session) || session.activeTurnId) continue;
-      if (attached.has(session.sessionKey)) continue;
+      if (sessionHasHistory(session) || this.isSessionPinnedForEviction(session)) continue;
       this.pendingSwarmCoordinatorWakes.delete(session.id);
       this.monitors?.disposeOwner(session.id);
       void this.swarmHost.disposeSession(session.id);
@@ -14616,6 +14698,40 @@ export class DaemonServer {
     void this.evictIdleSessionsAndSwarms();
   }
 
+  /** True when an Antigravity session has live background subagents or tasks on disk/in flight. */
+  private hasActiveAgyBackgroundWork(session: DaemonSession): boolean {
+    const loc = this.resolveAgyBrainLocationForSession(session);
+    if (loc) {
+      const subagents = this.agyBrainBridge.listSubagentSnapshotsSync(loc);
+      if (subagents.some((row) => row.status === "running" || row.status === "queued")) {
+        return true;
+      }
+      const bgTasks = this.agyBrainBridge.listBackgroundTasksSync(loc, session.cwd);
+      if (bgTasks.some((task) => task.state === "running")) {
+        return true;
+      }
+    }
+    const liveAcpTasks = this.acpBackgroundTasks.get(session.id);
+    if (liveAcpTasks) {
+      for (const task of liveAcpTasks.values()) {
+        if (task.state === "running") return true;
+      }
+    }
+    return false;
+  }
+
+  /** True when a session has active external ACP turns/wakeups/interactions, active AGY background tasks, or an active swarm. */
+  private hasActiveAcpOrSwarmWork(session: DaemonSession): boolean {
+    if (this.acpBridgeHost.hasActiveTurn(session.id)) return true;
+    if (this.acpOutOfTurnWakeups.has(session.id)) return true;
+    if (this.hasPendingAcpInteraction(session.id)) return true;
+    if (this.pendingSwarmCoordinatorWakes.has(session.id) || this.swarmCoordinatorWakeInFlight.has(session.id)) return true;
+    const swarmStatus = this.swarmHost.peekManager(session.id)?.status();
+    if (swarmStatus?.members.some((member) => member.state === "working")) return true;
+    if (this.hasActiveAgyBackgroundWork(session)) return true;
+    return false;
+  }
+
   /**
    * True when a loaded session owns live clients, turns, interactions, goals,
    * living swarms, ACP bridges, terminals, monitors, or explicit event
@@ -14623,11 +14739,13 @@ export class DaemonServer {
    */
   private isSessionPinnedForEviction(session: DaemonSession): boolean {
     if (session.activeTurnId || session.status !== "idle") return true;
+    if (this.sessionOperations.has(session.sessionKey)) return true;
     for (const raw of [...this.connections, ...this.sessionObservers]) {
       const owner = this.connectionLeases.owner(raw);
       if (owner.activeSessionKey === session.sessionKey) return true;
     }
     if (this.turnOwners.has(session.sessionKey)) return true;
+    if (this.steerContinuations.has(session.sessionKey)) return true;
     for (const frame of this.pendingInteractionFrames.values()) {
       if (frame.owner.activeSessionKey === session.sessionKey) return true;
     }
@@ -14641,6 +14759,7 @@ export class DaemonServer {
     }
     if (this.swarmHost.hasActiveSwarm(session.id)) return true;
     if (this.acpBridgeHost.hasActiveBridge(session.id)) return true;
+    if (this.hasActiveAcpOrSwarmWork(session)) return true;
     if (this.terminalRegistry?.hasRunning(session.id)) return true;
     if (this.monitors?.hasActiveWatches(session.id)) return true;
     if (this.eventSubscriptions.hasSessionSubscription(session.id)) return true;

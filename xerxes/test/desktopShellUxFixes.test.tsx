@@ -333,6 +333,15 @@ describe('Fix 8: ThreadDetailsCard overlap math, agent gating & T3Icon standardi
     )
     expect(html).toContain('t3-icon')
     expect(html).not.toContain('app-icon')
+    // Default quick-open rows under Immortals: Artifacts, Terminal, Activity in order
+    const immortalsIdx = html.indexOf('>Immortals<')
+    const artifactsIdx = html.indexOf('>Artifacts<')
+    const terminalIdx = html.indexOf('>Terminal<')
+    const activityIdx = html.indexOf('>Activity<')
+    expect(immortalsIdx).toBeGreaterThan(-1)
+    expect(artifactsIdx).toBeGreaterThan(immortalsIdx)
+    expect(terminalIdx).toBeGreaterThan(artifactsIdx)
+    expect(activityIdx).toBeGreaterThan(terminalIdx)
   })
 })
 

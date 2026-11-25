@@ -199,6 +199,7 @@ export interface AcpLoginFlowSnapshot {
 export interface AcpSpawnedLoginProcess {
   readonly exited: Promise<number | null>
   readonly kill: () => void
+  readonly pid?: number
   readonly stderr: ReadableStream<Uint8Array>
   readonly stdout: ReadableStream<Uint8Array>
   readonly writeLine: (line: string) => void
@@ -445,6 +446,7 @@ function spawnBunLoginProcess(options: {
     stderr: 'pipe',
   })
   return {
+    pid: proc.pid,
     stdout: proc.stdout,
     stderr: proc.stderr,
     exited: proc.exited,
@@ -632,6 +634,24 @@ export class DaemonAcpBridgeHost {
 
   hasActiveTurn(sessionId: string): boolean {
     return this.active.get(sessionId)?.activeAbort !== undefined
+  }
+
+  /**
+   * OS process IDs of active external ACP runtimes (`agy acp`, Claude Code,
+   * Codex, custom ACP) and login flows. Excluded from Xerxes's command
+   * MemoryGuard so external agent runtimes and their workloads are never
+   * killed by the daemon's command footprint guard.
+   */
+  activeProcessPids(): ReadonlySet<number> {
+    const pids = new Set<number>()
+    for (const entry of this.active.values()) {
+      const pid = entry.kind === 'acp' ? entry.client.pid : entry.runner.pid
+      if (pid !== undefined && pid > 0) pids.add(pid)
+    }
+    for (const flow of this.loginFlows.values()) {
+      if (flow.process.pid !== undefined && flow.process.pid > 0) pids.add(flow.process.pid)
+    }
+    return pids
   }
 
   isTurboMode(sessionId: string): boolean {

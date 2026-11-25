@@ -1497,7 +1497,27 @@ describe('Antigravity ACP (agy acp) Native UI Rendering, Approvals, Thinking & C
     expect(store.getSnapshot().savedAcpBinding?.agent_id).toBe('antigravity')
     bridge.calls.length = 0
     expect(await store.retryAcpConnect()).toBe(true)
-    expect(bridge.calls.some(c => c.method === 'acp.connect')).toBe(true)
+    expect(bridge.calls.find(c => c.method === 'acp.connect')?.params).toMatchObject({
+      agent_id: 'antigravity',
+      resume_session_id: '39c61d78-9f1a-4b2c-98f0-123456789abc',
+    })
+
+    // Sending a message after an unexpected ACP crash auto-reconnects the saved ACP runtime instead of falling back to native Xerxes
+    bridge.emit('acp_status', {
+      session_id: 'sess-reopen-1',
+      binding: { ...sampleAntigravityBinding, connected: false, error: 'Antigravity process exited (code 0)' },
+    })
+    expect(store.getSnapshot().acpBinding).toBeNull()
+    bridge.calls.length = 0
+    expect(await store.submit('continue')).toBe(true)
+    const connectIdx = bridge.calls.findIndex(c => c.method === 'acp.connect')
+    const submitIdx = bridge.calls.findIndex(c => c.method === 'turn.submit')
+    expect(connectIdx).toBeGreaterThanOrEqual(0)
+    expect(submitIdx).toBeGreaterThan(connectIdx)
+    expect(bridge.calls[connectIdx]?.params).toMatchObject({
+      agent_id: 'antigravity',
+      resume_session_id: '39c61d78-9f1a-4b2c-98f0-123456789abc',
+    })
 
     // 4. Escape capture listener closes open ACP popovers even when focus moved outside
     const listeners = new Set<(event: globalThis.KeyboardEvent) => void>()

@@ -2674,12 +2674,11 @@ export class Store {
   async retryAcpConnect(): Promise<boolean> {
     if (this.lastAcpConnect) {
       const { agentId, custom, modeId, resumeSessionId, additionalDirectories, sandbox, agent } = this.lastAcpConnect
-      const savedMode = this.frame.savedAcpBinding?.agent_id === agentId
-        ? this.frame.savedAcpBinding.current_mode
-        : undefined
-      const effectiveModeId = savedMode || modeId
+      const savedForAgent = this.frame.savedAcpBinding?.agent_id === agentId ? this.frame.savedAcpBinding : undefined
+      const effectiveModeId = savedForAgent?.current_mode || modeId
+      const effectiveResumeId = savedForAgent?.external_session_id || resumeSessionId
       const connectOpts = {
-        ...(resumeSessionId ? { resumeSessionId } : {}),
+        ...(effectiveResumeId ? { resumeSessionId: effectiveResumeId } : {}),
         ...(effectiveModeId ? { modeId: effectiveModeId } : {}),
         ...(additionalDirectories !== undefined ? { additionalDirectories } : {}),
         ...(sandbox !== undefined ? { sandbox } : {}),
@@ -3645,6 +3644,17 @@ export class Store {
     if (this.frame.turnActive) return this.steer(trimmed, images)
     const sessionKey = this.sessionKey
     if (this.preparingSubmissions.has(sessionKey)) return false
+    // A session bound to an external ACP runtime (e.g. Antigravity, Claude Code)
+    // whose process exited or was reopened must reconnect that external runtime
+    // before sending — never silently fall through to native Xerxes / local Mac.
+    if (
+      !this.isExternalAcpConnected()
+      && this.frame.savedAcpBinding
+      && this.frame.savedAcpBinding.transport !== 'native'
+    ) {
+      const reconnected = await this.reconnectSavedAcp()
+      if (!reconnected || this.sessionKey !== sessionKey) return false
+    }
     this.lastUser = shown
     const optimistic = {
       text: shown,
@@ -5705,7 +5715,10 @@ export class Store {
     this.failure = null
     this.patch({ failed: null, turnFailed: false, tab: 'activity' })
     if (!failed.lastUser) return
-    if (this.isExternalAcpConnected()) {
+    const isExternalAcpSession =
+      this.isExternalAcpConnected()
+      || Boolean(this.frame.savedAcpBinding && this.frame.savedAcpBinding.transport !== 'native')
+    if (isExternalAcpSession) {
       void this.submit('Continue')
       return
     }
@@ -6457,8 +6470,18 @@ export class Store {
       const hydrated = applyInflightTurn(this.builder, session.inflight)
       if (hydrated?.user) this.lastUser = hydrated.user
     }
+    if (!this.lastUser) {
+      const snapshotBlocks = this.builder.snapshot(str(session.active_turn_id) !== '')
+      for (let i = snapshotBlocks.length - 1; i >= 0; i -= 1) {
+        const block = snapshotBlocks[i]!
+        if (block.kind === 'user' && block.text.trim()) {
+          this.lastUser = block.text.trim()
+          break
+        }
+      }
+    }
     this.patch({ historyMore: Boolean(this.historyBefore || this.legacyHistory.length), historyLoading: false, historyError: null })
-    if (!preserve) this.refoldChangesFromHistory(session)
+    this.refoldChangesFromHistory(session, preserve)
     if (!preserve) void this.revealLatestUserMessage()
   }
 
@@ -6487,22 +6510,44 @@ export class Store {
    * working tree panel listed exactly those files as dirty — and the
    * session-scoped undo had nothing to act on.
    */
-  private refoldChangesFromHistory(session: Readonly<Record<string, unknown>>): void {
-    const executions = Array.isArray(session.tool_executions) ? session.tool_executions : []
+  private refoldChangesFromHistory(session: Readonly<Record<string, unknown>>, preserve = false): void {
+    const legacyExecutions = Array.isArray(session.tool_executions) ? session.tool_executions : []
+    const executions = legacyExecutions.length > 0
+      ? legacyExecutions
+      : this.historyActions.flatMap(action => action.executions)
     if (!executions.length) return
+    let clearedForPreserve = false
+    const clearBeforeFold = (): void => {
+      if (!preserve || clearedForPreserve) return
+      clearedForPreserve = true
+      this.changes.clear()
+      this.foldedToolIds.clear()
+    }
     let folded = false
     for (const raw of executions) {
       if (!raw || typeof raw !== 'object') continue
       const execution = raw as Record<string, unknown>
       if (execution.permitted === false || execution.error) continue
       const args = parseArgs(execution.arguments ?? execution.inputs ?? execution.input)
-      const structuredDiff = parseStructuredDiff(execution.diff)
+      const diffs = parseStructuredDiffs(execution.diffs, execution.diff)
+      if (diffs.length > 1) {
+        for (const entry of diffs) {
+          const entryStats = editStatsOf(execution.name, {}, entry, execution.locations)
+          if (!entryStats) continue
+          clearBeforeFold()
+          this.foldChange(entryStats, {}, str(execution.name), entry)
+          folded = true
+        }
+        continue
+      }
+      const structuredDiff = diffs[0] ?? null
       const stats = editStatsOf(execution.name, args, structuredDiff, execution.locations)
       if (!stats) continue
+      clearBeforeFold()
       this.foldChange(stats, args, str(execution.name), structuredDiff)
       folded = true
     }
-    if (folded) this.patch({ changes: [...this.changes.values()] })
+    if (folded) this.patch({ changes: [...this.changes.values()].sort((a, b) => a.path.localeCompare(b.path)) })
   }
 
   async loadOlderHistory(): Promise<void> {
@@ -7182,7 +7227,7 @@ export class Store {
     const { type, payload } = event
     if (type === 'desktop_connection') {
       if (payload.online === false) this.wentOffline(new Error('Connection lost. Reconnecting to your session.'))
-      else if (payload.online === true && this.frame.currentId && this.frame.connection !== 'online') this.retryConnection()
+      else if (payload.online === true && this.frame.connection !== 'online' && !this.frame.noWorkspace) this.retryConnection()
       return
     }
     if (type === 'session_attention') {

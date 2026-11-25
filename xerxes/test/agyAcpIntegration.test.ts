@@ -196,12 +196,12 @@ class SocketRpcClient {
     return new SocketRpcClient(socket)
   }
 
-  async next(predicate: (frame: RpcFrame) => boolean, timeoutMs = 5_000): Promise<RpcFrame> {
+  async next(predicate: (frame: RpcFrame) => boolean, timeoutMs = 5_000, label = ''): Promise<RpcFrame> {
     const existing = this.frames.find(predicate)
     if (existing) return existing
     return new Promise<RpcFrame>((resolveFrame, reject) => {
       const timer = setTimeout(() => {
-        reject(new Error(`Timed out waiting for daemon frame after ${timeoutMs}ms`))
+        reject(new Error(`Timed out waiting for daemon frame${label ? ` (${label})` : ''} after ${timeoutMs}ms`))
       }, timeoutMs)
       this.waiters.push({
         predicate,
@@ -216,7 +216,7 @@ class SocketRpcClient {
   async call(method: string, params: JsonRpcPayload = {}): Promise<JsonRpcPayload> {
     const id = ++this.nextId
     this.socket.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`)
-    const frame = await this.next(candidate => candidate.id === id)
+    const frame = await this.next(candidate => candidate.id === id, 5_000, `rpc:${method}`)
     if (frame.error) {
       throw new Error(`RPC ${method} failed (${frame.error.code}): ${frame.error.message}`)
     }
@@ -2989,4 +2989,432 @@ describe('Antigravity ACP Turbo mode, Auto sync, resume restoration & mid-turn u
       expect(sshRes.install_hint).toBeUndefined()
     }
   })
+})
+
+describe('Disconnect & SSH survival for external ACP (agy) and leased turns', () => {
+  test('external ACP (agy) survives probe disconnects, client drops, lease expiry, pending approvals, and headless completion; refuses idle restart; reattaches via session.open and initialize', async () => {
+    const root = await makeTempDir('xrx-agy-disconnect-')
+    const acpPid = 424242
+    let harnessRef: InMemoryAcpHarness | undefined
+    let releaseHeadlessTurn: (() => void) | undefined
+    let approvalPromptId: unknown
+    let approvalSessionId = ''
+
+    const bridgeHost = new DaemonAcpBridgeHost({
+      discoverAgents: () => AGY_AGENT_ROSTER,
+      createAcpClient: opts => {
+        harnessRef = createInMemoryAcpTransport((frame, h) => {
+          if (frame.method === 'initialize') {
+            h.pushAgentFrame({
+              jsonrpc: '2.0',
+              id: frame.id,
+              result: {
+                protocolVersion: 1,
+                agentInfo: { name: 'Antigravity ACP Server', version: '1.5.14' },
+                agentCapabilities: {
+                  promptCapabilities: { image: true, embeddedContext: true },
+                  sessionCapabilities: { resume: {}, close: {} },
+                },
+              },
+            })
+            return
+          }
+          if (frame.method === 'session/new') {
+            h.pushAgentFrame({
+              jsonrpc: '2.0',
+              id: frame.id,
+              result: {
+                sessionId: 'agy-survive-1',
+                configOptions: makeAgyConfigOptions('gemini-4-carbon', 'medium', 'default'),
+              },
+            })
+            return
+          }
+          if (frame.method === 'session/set_config_option') {
+            const p = frame.params as Record<string, unknown>
+            const nextMode = p.configId === 'mode' && typeof p.value === 'string' ? p.value : 'default'
+            h.pushAgentFrame({
+              jsonrpc: '2.0',
+              id: frame.id,
+              result: { configOptions: makeAgyConfigOptions('gemini-4-carbon', 'medium', nextMode) },
+            })
+            return
+          }
+          if (frame.method === 'session/close') {
+            h.pushAgentFrame({ jsonrpc: '2.0', id: frame.id, result: {} })
+            return
+          }
+          if (frame.method === 'session/prompt') {
+            const params = frame.params as Record<string, unknown>
+            const sid = String(params.sessionId)
+            const text = extractSpecPromptText(params)
+            if (text.includes('APPROVAL_ACROSS_DISCONNECT')) {
+              approvalPromptId = frame.id
+              approvalSessionId = sid
+              h.pushAgentFrame({
+                jsonrpc: '2.0',
+                method: 'session/update',
+                params: {
+                  sessionId: sid,
+                  update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Preparing edit...' } },
+                },
+              })
+              h.pushAgentFrame({
+                jsonrpc: '2.0',
+                id: 'perm-disconnect-1',
+                method: 'session/request_permission',
+                params: {
+                  sessionId: sid,
+                  toolCall: {
+                    toolCallId: 'tc-perm-disconnect',
+                    title: 'Edit notes.ts',
+                    kind: 'edit',
+                    rawInput: { Path: join(root, 'notes.ts') },
+                  },
+                  options: [
+                    { optionId: 'allow_once', name: 'Allow once', kind: 'allow_once' },
+                    { optionId: 'reject_once', name: 'Reject', kind: 'reject_once' },
+                  ],
+                },
+              })
+              return
+            }
+            if (text.includes('HEADLESS_COMPLETE')) {
+              const headlessPromptId = frame.id
+              h.pushAgentFrame({
+                jsonrpc: '2.0',
+                method: 'session/update',
+                params: {
+                  sessionId: sid,
+                  update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'Started headless work...' } },
+                },
+              })
+              releaseHeadlessTurn = () => {
+                h.pushAgentFrame({
+                  jsonrpc: '2.0',
+                  method: 'session/update',
+                  params: {
+                    sessionId: sid,
+                    update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: ' Finished completely headless!' } },
+                  },
+                })
+                h.pushAgentFrame({
+                  jsonrpc: '2.0',
+                  id: headlessPromptId,
+                  result: { stopReason: 'end_turn' },
+                })
+              }
+              return
+            }
+          }
+          if (frame.id === 'perm-disconnect-1' && frame.result) {
+            h.pushAgentFrame({
+              jsonrpc: '2.0',
+              method: 'session/update',
+              params: {
+                sessionId: approvalSessionId,
+                update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: ' Edit approved and applied!' } },
+              },
+            })
+            h.pushAgentFrame({
+              jsonrpc: '2.0',
+              id: approvalPromptId,
+              result: { stopReason: 'end_turn' },
+            })
+          }
+        })
+        return new AcpStdioClient({
+          ...opts,
+          transport: { ...harnessRef.transport, pid: acpPid },
+        })
+      },
+    })
+
+    const socketPath = join(root, 'daemon.sock')
+    const runtime = new InMemoryDaemonRuntime(
+      new AgentTurnRunner({ llm: makeUnusedNativeLlm(), model: 'unused-native', tools: [] }),
+      { currentProjectDirectory: root, sessionDirectory: join(root, 'sessions') },
+    )
+    const server = new DaemonServer({
+      socketPath,
+      runtime,
+      acpBridgeHost: bridgeHost,
+      connectionLeaseGraceMs: 30,
+    })
+    await server.start()
+
+    const clients: SocketRpcClient[] = []
+    try {
+      // 1. Connect AGY on a fresh 0-turn session (without session_owned_turns), then drop a probe AND the client.
+      const client1 = await SocketRpcClient.open(socketPath)
+      clients.push(client1)
+      const init1 = await client1.call('initialize', { session_key: 'desktop-slot-1', project_dir: root })
+      const sessionId = String(init1.session_id)
+      const connected = await client1.call('acp.connect', {
+        session_id: sessionId,
+        agent_id: 'antigravity',
+        cwd: root,
+        mode_id: 'default',
+      })
+      expect(connected.ok).toBe(true)
+      expect(server.activeAcpProcessPids().has(acpPid)).toBe(true)
+
+      const probe = await SocketRpcClient.open(socketPath)
+      clients.push(probe)
+      expect((await probe.call('runtime.status')).ok).toBe(true)
+      probe.close()
+      await Bun.sleep(40)
+      expect(bridgeHost.hasActiveBridge(sessionId)).toBe(true)
+      expect(harnessRef!.killed()).toBe(false)
+
+      client1.close()
+      await Bun.sleep(40)
+      expect(bridgeHost.hasActiveBridge(sessionId)).toBe(true)
+      expect(harnessRef!.killed()).toBe(false)
+
+      // 2. Start an ACP turn that waits on a permission prompt, disconnect past lease expiry,
+      //    verify restart_if_idle refuses, reattach via session.open(sessionId), and approve.
+      const client2 = await SocketRpcClient.open(socketPath)
+      clients.push(client2)
+      await client2.call('initialize', { resume_session_id: sessionId, project_dir: root, session_owned_turns: true })
+      await client2.call('connection.lease', {})
+      const submit1 = await client2.call('turn.submit', { text: 'APPROVAL_ACROSS_DISCONNECT' })
+      expect(submit1.ok).toBe(true)
+      const approvalFrame = await client2.next(
+        frame => frame.method === 'event' && frame.params?.type === 'approval_request',
+        5_000,
+        'client2 approval_request',
+      )
+      const approvalId = String((approvalFrame.params?.payload as Record<string, unknown>).id)
+      expect(approvalId).toBeTruthy()
+
+      client2.close()
+      await Bun.sleep(80)
+      expect(bridgeHost.hasActiveBridge(sessionId)).toBe(true)
+      expect(bridgeHost.hasActiveTurn(sessionId)).toBe(true)
+      expect(harnessRef!.killed()).toBe(false)
+
+      const probe2 = await SocketRpcClient.open(socketPath)
+      clients.push(probe2)
+      const restartAttempt = await probe2.call('runtime.restart_if_idle', {})
+      expect(restartAttempt).toMatchObject({ ok: false, busy: true })
+      probe2.close()
+
+      const client3 = await SocketRpcClient.open(socketPath)
+      clients.push(client3)
+      const reopened = await client3.call('session.open', { session_key: sessionId, project_dir: root })
+      expect(reopened.ok).toBe(true)
+      expect((reopened.session as Record<string, unknown>).acp_binding).toMatchObject({ connected: true })
+      const pendingInteractions = reopened.pending_interactions as Array<{ type: string; payload: Record<string, unknown> }>
+      expect(pendingInteractions.some(item => item.type === 'approval_request' && item.payload.id === approvalId)).toBe(true)
+
+      const approvalAck = await client3.call('permission_response', { request_id: approvalId, response: 'approve' })
+      expect(approvalAck.ok).toBe(true)
+      const appliedChunk = await client3.next(
+        frame =>
+          frame.method === 'event' &&
+          frame.params?.type === 'text_part' &&
+          String((frame.params?.payload as Record<string, unknown>).text ?? '').includes('Edit approved and applied!'),
+        5_000,
+        'client3 appliedChunk',
+      )
+      expect(appliedChunk).toBeDefined()
+      await client3.next(frame => frame.method === 'event' && frame.params?.type === 'turn_end', 5_000, 'client3 turn_end')
+
+      // 3. Submit a turn, disconnect ALL clients mid-turn, finish headless, and verify initialize reattach restores it.
+      const submit2 = await client3.call('turn.submit', { text: 'HEADLESS_COMPLETE' })
+      expect(submit2.ok).toBe(true)
+      await client3.next(
+        frame =>
+          frame.method === 'event' &&
+          frame.params?.type === 'text_part' &&
+          String((frame.params?.payload as Record<string, unknown>).text ?? '').includes('Started headless work'),
+        5_000,
+        'client3 headless start',
+      )
+      client3.close()
+      await Bun.sleep(80)
+      expect(bridgeHost.hasActiveTurn(sessionId)).toBe(true)
+
+      releaseHeadlessTurn?.()
+      for (let i = 0; i < 100 && bridgeHost.hasActiveTurn(sessionId); i += 1) {
+        await Bun.sleep(10)
+      }
+      expect(bridgeHost.hasActiveTurn(sessionId)).toBe(false)
+      expect(bridgeHost.hasActiveBridge(sessionId)).toBe(true)
+
+      const client4 = await SocketRpcClient.open(socketPath)
+      clients.push(client4)
+      const hydrated = await client4.call('initialize', {
+        resume_session_id: sessionId,
+        project_dir: root,
+        history_limit: 100,
+        session_owned_turns: true,
+      })
+      expect(hydrated.ok).toBe(true)
+      expect((hydrated.session as Record<string, unknown>).acp_binding).toMatchObject({ connected: true })
+      expect(JSON.stringify(hydrated.session)).toContain('Finished completely headless!')
+    } finally {
+      for (const client of clients) client.close()
+      await server.stop()
+    }
+  }, 15_000)
+
+  test('leased client waiting on native approval across lease expiry promotes to session-owned, answers on reconnect, and releases turnOwners', async () => {
+    const { DaemonInteractionBoard } = await import('../src/daemon/interactions.js')
+    const root = await makeTempDir('xrx-leased-approval-')
+    const interactions = new DaemonInteractionBoard()
+    let turnNumber = 0
+    const runtime = new InMemoryDaemonRuntime(
+      {
+        async *run(session, _text, signal) {
+          turnNumber += 1
+          if (turnNumber === 1) {
+            const requestId = 'leased-native-approval-1'
+            yield {
+              type: 'approval_request',
+              payload: {
+                id: requestId,
+                request_id: requestId,
+                session_id: session.id,
+                tool_call_id: 'tc-leased-1',
+                tool_name: 'exec',
+                arguments: { cmd: 'echo ok' },
+                description: 'Confirm command after reconnect',
+              },
+            }
+            const decision = await interactions.permissionBroker(session.id).request(
+              {
+                requestId,
+                description: 'Confirm command after reconnect',
+                inputs: { cmd: 'echo ok' },
+                toolCall: { id: 'tc-leased-1', type: 'function', function: { name: 'exec', arguments: { cmd: 'echo ok' } } },
+              },
+              signal,
+            )
+            const reply = decision === 'approve' ? 'Approved after lease expiry' : 'Denied'
+            yield { type: 'text_part', payload: { session_id: session.id, text: reply } }
+            return
+          }
+          yield { type: 'text_part', payload: { session_id: session.id, text: 'Second turn succeeded cleanly' } }
+        },
+      },
+      { currentProjectDirectory: root, interactions, model: 'test-model', sessionDirectory: join(root, 'sessions') },
+    )
+    const socketPath = join(root, 'daemon.sock')
+    const server = new DaemonServer({
+      socketPath,
+      runtime,
+      interactions,
+      connectionLeaseGraceMs: 25,
+    })
+    await server.start()
+
+    const clients: SocketRpcClient[] = []
+    try {
+      const client1 = await SocketRpcClient.open(socketPath)
+      clients.push(client1)
+      const init1 = await client1.call('initialize', { session_key: 'leased-native', project_dir: root })
+      const sessionId = String(init1.session_id)
+      expect((await client1.call('connection.lease', {})).ok).toBe(true)
+      expect((await client1.call('turn.submit', { text: 'Need approval' })).ok).toBe(true)
+
+      const approvalEvent = await client1.next(
+        frame => frame.method === 'event' && frame.params?.type === 'approval_request',
+      )
+      const requestId = String((approvalEvent.params?.payload as Record<string, unknown>).id)
+      expect(requestId).toBe('leased-native-approval-1')
+
+      // Drop transport and let the 25ms lease expire while waiting on approval.
+      client1.close()
+      await Bun.sleep(80)
+      expect(runtime.sessionStatus('leased-native')?.activeTurnId).not.toBe('')
+      expect(runtime.sessionStatus('leased-native')?.cancelRequested).toBe(false)
+
+      // Reconnect on a brand-new client, receive the promoted approval, answer it, and verify follow-up turns work.
+      const client2 = await SocketRpcClient.open(socketPath)
+      clients.push(client2)
+      const resumed = await client2.call('initialize', {
+        resume_session_id: sessionId,
+        project_dir: root,
+        session_owned_turns: true,
+      })
+      const pending = resumed.pending_interactions as Array<{ type: string; payload: Record<string, unknown> }>
+      expect(pending.some(item => item.type === 'approval_request' && item.payload.id === requestId)).toBe(true)
+
+      expect((await client2.call('permission_response', { request_id: requestId, response: 'approve' })).ok).toBe(true)
+      for (let i = 0; i < 100; i += 1) {
+        const status = await client2.call('session.status', { history_limit: 0 })
+        if (status.provider_binding_busy === false && (status.session as { status?: string } | undefined)?.status === 'idle') break
+        await Bun.sleep(10)
+      }
+      expect(runtime.sessionStatus('leased-native')?.messages.at(-1)?.content).toContain('Approved after lease expiry')
+
+      // Proves turnOwners was cleanly released after the promoted turn completed.
+      client2.frames.length = 0
+      const followUp = await client2.call('turn.submit', { text: 'Follow up turn' })
+      expect(followUp.ok).toBe(true)
+      await client2.next(frame => frame.method === 'event' && frame.params?.type === 'turn_end', 5_000, 'client2 followUp turn_end')
+      expect(runtime.sessionStatus('leased-native')?.messages.at(-1)?.content).toContain('Second turn succeeded cleanly')
+    } finally {
+      for (const client of clients) client.close()
+      await server.stop()
+    }
+  }, 15_000)
+
+  test.skipIf(process.platform === 'win32')('real daemon subprocess ignores POSIX SIGHUP and continues serving RPCs', async () => {
+    const root = await makeTempDir('xrx-daemon-sighup-')
+    const homeDir = join(root, 'xerxes-home')
+    const socketPath = join(root, 'daemon.sock')
+    const pidPath = join(root, 'daemon.pid')
+    const cliPath = join(import.meta.dir, '..', 'src', 'cli.ts')
+    const child = Bun.spawn(
+      [process.execPath, cliPath, 'daemon', '--project-dir', root, '--socket', socketPath, '--pid-file', pidPath],
+      {
+        cwd: root,
+        env: { ...process.env, XERXES_HOME: homeDir },
+        stdin: 'ignore',
+        stdout: 'ignore',
+        stderr: 'pipe',
+      },
+    )
+    let client: SocketRpcClient | undefined
+    try {
+      for (let i = 0; i < 200; i += 1) {
+        try {
+          client = await SocketRpcClient.open(socketPath)
+          break
+        } catch {
+          await Bun.sleep(25)
+        }
+      }
+      expect(client).toBeDefined()
+      const before = await client!.call('runtime.status', {})
+      expect(before.ok).toBe(true)
+      expect(before.pid).toBe(child.pid)
+      client!.close()
+      client = undefined
+
+      // Simulate SSH terminal hangup; the daemon must stay alive and keep answering RPCs.
+      process.kill(child.pid, 'SIGHUP')
+      await Bun.sleep(150)
+
+      client = await SocketRpcClient.open(socketPath)
+      const after = await client.call('runtime.status', {})
+      expect(after.ok).toBe(true)
+      expect(after.pid).toBe(child.pid)
+
+      await client.call('shutdown', {})
+      client.close()
+      client = undefined
+      const exitCode = await Promise.race([
+        child.exited,
+        Bun.sleep(5_000).then(() => 'timeout' as const),
+      ])
+      expect(exitCode).toBe(0)
+    } finally {
+      client?.close()
+      try { child.kill('SIGKILL') } catch { /* Already exited. */ }
+    }
+  }, 15_000)
 })

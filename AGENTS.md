@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Xerxes (`@xsimurgh/xerxes-agents` v0.8.57) is a Bun-native (Bun 1.3.12+) strict TypeScript monorepo built around one global v35 JSON-RPC daemon serving OpenTUI, Electron Desktop, VS Code, Mobile PWA, Hub/Supervisor, Channels, and external ACP bridges.
+Xerxes (`@xsimurgh/xerxes-agents` v0.8.58) is a Bun-native (Bun 1.3.12+) strict TypeScript monorepo built around one global v35 JSON-RPC daemon serving OpenTUI, Electron Desktop, VS Code, Mobile PWA, Hub/Supervisor, Channels, and external ACP bridges.
 
 ## Universal Commandments
 

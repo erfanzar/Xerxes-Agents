@@ -81,8 +81,14 @@ export class DesktopProviderForwarding {
     this.review = review
     const access = this.sessions.get(session.key)
     const running = working(session) || response.provider_binding_busy === true
+    const acpBinding = record(session.acp_binding)
+    const savedAcpBinding = record(session.saved_acp_binding)
+    const externalAcp =
+      (acpBinding.connected === true && acpBinding.transport !== 'native')
+      || (typeof acpBinding.agent_id === 'string' && acpBinding.agent_id !== '' && acpBinding.transport !== 'native')
+      || (typeof savedAcpBinding.agent_id === 'string' && savedAcpBinding.agent_id !== '' && savedAcpBinding.transport !== 'native')
     return {ok:true, review:review.id, destination:this.destination, workspace:this.workspace, sessionKey:session.key,
-      profiles, running, remoteProfile:session.profile_name, model:session.model,
+      profiles, running, externalAcp, remoteProfile:session.profile_name, model:session.model,
       turns: typeof session.turn_count === 'number' ? session.turn_count : undefined,
       // A grant held here does not help if the host's binding dropped with its link.
       source:session.local_provider_label ? access && Date.now() < access.expiresAt && response.provider_binding_lost !== true ? 'local' : 'local-unavailable' : 'remote',
@@ -191,6 +197,9 @@ export class DesktopProviderForwarding {
     if (!this.preferred) return { status: 'skipped', reason: 'automatic provider access is off' }
     try {
       const review = await this.inspect()
+      // External ACP agents (Antigravity, Claude Code ACP, Codex) run directly
+      // on the remote SSH host and must never be bound to local-Mac relays.
+      if (review.externalAcp) return { status: 'skipped', reason: 'this conversation uses an external ACP runtime on the host' }
       // A conversation relayed through this computer moves to the host's own
       // working sign-in once idle: it used to stay here for good after its first
       // turn. A person's explicit "use via Mac" in this window is kept.

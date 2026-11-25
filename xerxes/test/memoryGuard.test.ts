@@ -198,3 +198,79 @@ test.skipIf(!memoryGuardSupported())('the command tool tells the agent its comma
     await rm(directory, { recursive: true, force: true })
   }
 }, 30_000)
+
+test('MemoryGuard never stops excluded external ACP runtimes (e.g. agy acp) or their heavy child workloads', async () => {
+  const { DaemonAcpBridgeHost } = await import('../src/daemon/acpBridgeHost.js')
+  const { AcpStdioClient } = await import('../src/acp/client.js')
+  const { PassThrough } = await import('node:stream')
+  const encoder = new TextEncoder()
+  const out = new PassThrough()
+  const acpPid = 55501
+  const host = new DaemonAcpBridgeHost({
+    discoverAgents: () => [{
+      id: 'antigravity',
+      name: 'Antigravity',
+      provider: 'antigravity',
+      command: '/usr/local/bin/agy',
+      args: ['acp'],
+      available: true,
+      transport: 'acp',
+      description: 'Antigravity ACP',
+    }],
+    createAcpClient: opts => new AcpStdioClient({
+      ...opts,
+      transport: {
+        pid: acpPid,
+        stdout: new ReadableStream<Uint8Array>({
+          start(controller) {
+            out.on('data', chunk => controller.enqueue(chunk instanceof Uint8Array ? chunk : encoder.encode(String(chunk))))
+            out.on('end', () => controller.close())
+          },
+        }),
+        exited: new Promise<number | null>(() => undefined),
+        kill: () => undefined,
+        writeLine: line => {
+          const frame = JSON.parse(line) as { id?: unknown; method?: string }
+          if (frame.method === 'initialize') {
+            out.write(`${JSON.stringify({ jsonrpc: '2.0', id: frame.id, result: { protocolVersion: 1 } })}\n`)
+          } else if (frame.method === 'session/new') {
+            out.write(`${JSON.stringify({ jsonrpc: '2.0', id: frame.id, result: { sessionId: 'agy-mem-1' } })}\n`)
+          }
+        },
+      },
+    }),
+  })
+  const connected = await host.connect({ sessionId: 's-mem', agentId: 'antigravity', cwd: '/tmp' })
+  expect(connected.ok).toBe(true)
+  expect(host.activeProcessPids().has(acpPid)).toBe(true)
+
+  const signals: Array<[number, string]> = []
+  const rows: readonly ProcessRow[] = [
+    { pid: 100, ppid: 1, command: 'bun cli.js daemon' },
+    { pid: acpPid, ppid: 100, command: '/home/erfan/.local/bin/agy acp' },
+    { pid: 55502, ppid: acpPid, command: '/home/erfan/easydel-src/.venv/bin/python -' },
+    { pid: 60001, ppid: 100, command: 'bun test runaway-native-tool' },
+  ]
+  const sizes = new Map<number, number>([
+    [acpPid, 1 * GB],
+    [55502, 255 * GB],
+    [60001, 250 * GB],
+  ])
+  const ports: MemoryGuardPorts = {
+    listProcesses: async () => rows,
+    footprintBytes: pid => sizes.get(pid),
+    kill: (pid, signal) => { signals.push([pid, signal]) },
+  }
+  const guard = new MemoryGuard({
+    rootPid: 100,
+    limitBytes: () => 220 * GB,
+    ports,
+    graceMs: 20,
+    exclude: () => host.activeProcessPids(),
+  })
+  const stops = await guard.tick()
+  expect(stops.map(stop => stop.rootPid)).toEqual([60001])
+  expect(signals).toEqual([[60001, 'SIGTERM']])
+  await host.disposeAll()
+  expect(host.activeProcessPids().size).toBe(0)
+})

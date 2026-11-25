@@ -1159,6 +1159,7 @@ export function bridgeEventFromAcpClientEvent(
 export interface ClaudeStreamJsonProcess {
   readonly exited: Promise<number | null>
   readonly kill: () => void
+  readonly pid?: number
   readonly stderr?: ReadableStream<Uint8Array> | null
   readonly stdout: ReadableStream<Uint8Array>
 }
@@ -1226,6 +1227,10 @@ export class ClaudeStreamJsonRunner {
 
   get sessionId(): string | undefined {
     return this.externalSessionId
+  }
+
+  get pid(): number | undefined {
+    return this.activeProcess?.pid
   }
 
   getModel(): string | undefined {
@@ -1723,6 +1728,7 @@ function spawnBunClaudeStreamProcess(
     void child.stdin.end?.()
   }
   return {
+    pid: child.pid,
     stdout: child.stdout,
     stderr: child.stderr,
     exited: child.exited.then(code => (typeof code === 'number' ? code : null)),

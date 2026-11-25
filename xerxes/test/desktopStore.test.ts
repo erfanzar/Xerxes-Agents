@@ -61,7 +61,7 @@ const initializeResult = {
   branch: 'main',
   context_limit: 262_000,
   daemon_protocol: 35,
-  daemon_version: '0.8.57',
+  daemon_version: '0.8.58',
   daemon_build_id: 'current-build',
 }
 
@@ -750,7 +750,7 @@ describe('Store workspace folds', () => {
     expect(store.getSnapshot().connection).toBe('online')
     expect(store.getSnapshot().model).toBe('kimi-for-coding')
     const initialize = bridge.calls.find(call => call.method === 'initialize')
-    expect(initialize?.params).toMatchObject({ client_protocol: 35, client_version: '0.8.57' })
+    expect(initialize?.params).toMatchObject({ client_protocol: 35, client_version: '0.8.58' })
     expect(store.getSnapshot().daemonWarning).toBeNull()
   })
 
@@ -3046,5 +3046,93 @@ test('paging back to the person\'s message never finalizes the turn running live
     const live = current.getSnapshot().blocks.flatMap(block => block.kind === 'agent' && !block.text.startsWith('Step ') ? [block.text] : [])
     expect(live).toEqual(['Reading the file now.'])
     secondPage.resolve({ ok: true, history: { actions: [], has_more: false, before: null } })
+  } finally { delete (globalThis as { window?: unknown }).window }
+})
+
+test('desktop_connection online triggers recovery even if initial connect dropped before currentId was assigned', async () => {
+  let attempt = 0
+  const bridge = new FakeBridge(method => {
+    if (method === 'initialize') {
+      attempt += 1
+      if (attempt === 1) return Promise.reject(new Error('SSH tunnel closed'))
+      return initializeResult
+    }
+    return { ok: true, sessions: [] }
+  })
+  withWindow(bridge)
+  try {
+    const store = new Store()
+    store.start(bridge)
+    await Bun.sleep(15)
+    expect(store.getSnapshot().currentId).toBe('')
+    expect(store.getSnapshot().connection).toBe('offline')
+    bridge.push('desktop_connection', { online: true })
+    await Bun.sleep(15)
+    expect(store.getSnapshot().connection).toBe('online')
+    expect(store.getSnapshot().currentId).toBe(initializeResult.session_id)
+  } finally { delete (globalThis as { window?: unknown }).window }
+})
+
+test('same-session reconnect refolds edits finished while disconnected from paged history actions without double-counting', async () => {
+  const firstEdit = {
+    tool_call_id: 'tc-1',
+    name: 'edit_file',
+    permitted: true,
+    diff: { path: '/repo/a.ts', old_text: 'const a = 1\n', new_text: 'const a = 2\n' },
+  }
+  const secondMultiEdit = {
+    tool_call_id: 'tc-2',
+    name: 'multi_edit',
+    permitted: true,
+    diffs: [
+      { path: '/repo/a.ts', old_text: 'const a = 2\n', new_text: 'const a = 3\n' },
+      { path: '/repo/b.ts', old_text: '', new_text: 'export const b = 1\n' },
+    ],
+  }
+  const bridge = new FakeBridge(method => {
+    if (method === 'initialize') {
+      return {
+        ...initializeResult,
+        session: {
+          ...initializeResult.session,
+          history: {
+            actions: [{ id: 'act-1', messages: [{ role: 'assistant', content: 'First edit' }], executions: [firstEdit], thinking: [] }],
+            has_more: false,
+            before: null,
+          },
+        },
+      }
+    }
+    return { ok: true, sessions: [] }
+  })
+  withWindow(bridge)
+  try {
+    const store = new Store()
+    store.start(bridge)
+    await Bun.sleep(15)
+    expect(store.getSnapshot().changes.map(row => [row.path, row.adds, row.dels])).toEqual([['/repo/a.ts', 1, 1]])
+
+    // Disconnect while a second multi-file edit completes headless on the daemon, then reconnect to the same session.
+    bridge.respondWith(method => method === 'initialize' ? {
+      ...initializeResult,
+      session: {
+        ...initializeResult.session,
+        history: {
+          actions: [
+            { id: 'act-1', messages: [{ role: 'assistant', content: 'First edit' }], executions: [firstEdit], thinking: [] },
+            { id: 'act-2', messages: [{ role: 'assistant', content: 'Second edit' }], executions: [secondMultiEdit], thinking: [] },
+          ],
+          has_more: false,
+          before: null,
+        },
+      },
+    } : { ok: true, sessions: [] })
+    bridge.push('desktop_connection', { online: false })
+    await store.retryConnection()
+    await Bun.sleep(15)
+    expect(store.getSnapshot().changes.map(row => [row.path, row.adds, row.dels])).toEqual([
+      ['/repo/a.ts', 2, 2],
+      ['/repo/b.ts', 1, 0],
+    ])
   } finally { delete (globalThis as { window?: unknown }).window }
 })

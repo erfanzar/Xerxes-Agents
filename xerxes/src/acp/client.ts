@@ -433,6 +433,7 @@ export interface AcpSpawnedProcess {
   readonly closeStdin?: () => void
   readonly exited: Promise<number | null>
   readonly kill: (signal?: NodeJS.Signals | number) => void
+  readonly pid?: number
   readonly stderr?: ReadableStream<Uint8Array> | null
   readonly stdout: ReadableStream<Uint8Array>
   readonly writeLine: (line: string) => void | Promise<void>
@@ -688,6 +689,11 @@ export class AcpStdioClient {
   /** Replace or update host callbacks (e.g., per-turn approval forwarding). */
   setHandlers(handlers: AcpClientHostHandlers): void {
     this.handlers = handlers
+  }
+
+  /** OS process id of the spawned ACP agent subprocess, when backed by a real process. */
+  get pid(): number | undefined {
+    return this.proc?.pid
   }
 
   /** Number of currently active `session/prompt` RPCs for a session. */
@@ -2969,6 +2975,7 @@ function spawnBunAcpProcess(
   })
 
   return {
+    pid: child.pid,
     stdout: child.stdout,
     stderr: child.stderr,
     exited: child.exited.then(code => (typeof code === 'number' ? code : null)),

@@ -1431,6 +1431,18 @@ async function runDaemonOwned(
   daemonRef = daemon;
   announceModeChange = (sessionId) => daemon.notifySessionModeChanged(sessionId);
   announceMonitorEvent = (monitor, event) => daemon.notifyMonitorEvent(monitor, event);
+  // A detached daemon must outlive the terminal, SSH session, or parent app
+  // that launched it: install SIGHUP ignore and broken-pipe guards BEFORE
+  // daemon.start() so there is zero startup race window while sockets open.
+  const ignoreSighup = (): void => {};
+  const ignoreBrokenPipe = (error: NodeJS.ErrnoException): void => {
+    if (error?.code === "EPIPE" || error?.code === "ERR_STREAM_DESTROYED") return;
+  };
+  if (process.platform !== "win32") {
+    process.on("SIGHUP", ignoreSighup);
+  }
+  process.stderr?.on("error", ignoreBrokenPipe);
+  process.stdout?.on("error", ignoreBrokenPipe);
   try {
     await daemon.start();
     // Stop any agent command whose process tree outgrows the memory limit: a
@@ -1440,7 +1452,11 @@ async function runDaemonOwned(
         rootPid: process.pid,
         limitBytes: () => resolveMemoryLimitBytes(memoryGuardSettings),
         ports: hostMemoryGuardPorts(),
-        exclude: () => terminals.pidsLabelled("User shell"),
+        exclude: () => {
+          const excluded = new Set<number>(terminals.pidsLabelled("User shell"));
+          for (const pid of daemon.activeAcpProcessPids()) excluded.add(pid);
+          return excluded;
+        },
         onStop: stop => daemon.broadcast("notification", {
           level: "warning",
           message: `Memory guard stopped \`${stop.command.slice(0, 160)}\`: it used ${formatBytes(stop.bytes)}, over the ${formatBytes(stop.limitBytes)} limit. Change the limit in Settings → General.`,
@@ -1484,6 +1500,11 @@ async function runDaemonOwned(
       try { await cleanup(); }
       catch (cleanupError) { console.error("Daemon startup cleanup failed:", cleanupError); }
     }
+    if (process.platform !== "win32") {
+      process.off("SIGHUP", ignoreSighup);
+    }
+    process.stderr?.off("error", ignoreBrokenPipe);
+    process.stdout?.off("error", ignoreBrokenPipe);
     throw error;
   }
   console.error("Xerxes Bun daemon listening on " + socketPath);
@@ -1495,6 +1516,11 @@ async function runDaemonOwned(
   try {
     await daemonLifetime;
   } finally {
+    if (process.platform !== "win32") {
+      process.off("SIGHUP", ignoreSighup);
+    }
+    process.stderr?.off("error", ignoreBrokenPipe);
+    process.stdout?.off("error", ignoreBrokenPipe);
     process.off("SIGINT", finish);
     process.off("SIGTERM", finish);
     await daemon.stop();

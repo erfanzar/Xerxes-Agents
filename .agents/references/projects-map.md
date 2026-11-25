@@ -33,7 +33,7 @@ build:vscode   -> build:runtime -> buildDesktop.ts -> buildVscode.ts (CJS, webvi
 release/Docker -> packaging/runtime/{package.json,bun.lock} + bin/{xerxes*,default/} + ui/entry.js + skills/
 ```
 
-## 4. Version Sites (`0.8.57`: 9 Files + 4 Tests)
+## 4. Version Sites (`0.8.58`: 9 Files + 4 Tests)
 
 - **Manifests (3)**: `package.json`, `xerxes/package.json` (`releasePackage.ts`, `vscode-marketplace.yml`), `packaging/runtime/package.json` (+ `@opentui/*`/`react` & `bun.lock`: `containerDistribution`, `nativeWorkflowContract`).
 - **Source & Docs (6, manual)**: `src/core/version.ts`, `src/core/config.ts:547`, `src/desktop/renderer/buildInfo.ts:14`, `src/llms/{anthropic.ts:760,mistral.ts:365}`, `docs/changelog.md:10`.

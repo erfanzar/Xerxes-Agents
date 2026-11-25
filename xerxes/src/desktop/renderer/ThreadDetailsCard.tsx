@@ -7,7 +7,7 @@
  * Top-right floating card:
  * - Section 1: Machine/Workspace row + folder switcher, Open in Files/Finder menu, + New worktree
  * - Section 2: Git branch row, Commit & push menu, Changes (+adds -dels) diff trigger
- * - Section 3 (conditional): Quiet 1-line links for active Immortals, Subagents, Plan, or Artifacts
+ * - Section 3: Quick links for Immortals, Artifacts, Terminal, Activity, plus active Subagents/Plan/Goal
  *
  * On wide windows (`mode === 'inline'`) it floats gently in the top-right margin beside the
  * centered conversation column; on narrower windows (`mode === 'popover'`) it dismisses on
@@ -152,6 +152,7 @@ export function ThreadDetailsCard({
 
   const fleet = activityFleetRows(snap.fleet, snap.blocks)
   const workingAgents = fleet.filter(row => agentState(row.status).priority < 2).length
+  const runningTerminals = snap.terminals.filter(row => row.running).length
   const goal = parseGoal(snap.goal)
   const todos = snap.todos ?? snap.plan?.items.map((item, idx) => ({ id: String(idx), content: item.text, status: item.done ? 'completed' : 'pending' })) ?? []
   const doneTodos = todos.filter(item => item.status === 'completed').length
@@ -371,47 +372,62 @@ export function ThreadDetailsCard({
         </button>
       </section>
 
-      {/* Section 3: Active Xerxes Orchestration (only shown when live work exists) */}
-      {(goal || todos.length > 0 || fleet.length > 0 || snap.swarm?.active || showsImmortalsForSession(snap)) && (
-        <section className="t3-dsec">
-          {(snap.swarm?.active || showsImmortalsForSession(snap)) && (
-            <button type="button" className="t3-drow" onClick={() => onNavigate('swarm')}>
-              <T3Icon name="network" size={14} className="t3-drow__ico" />
-              <span className="t3-drow__label">Immortals</span>
-              <span className="t3-drow__meta">
-                {snap.swarm?.active ? `${swarmMemberCounts(snap.swarm.members).working} active` : 'Open'}
-              </span>
-            </button>
-          )}
-          {fleet.length > 0 && (
-            <button type="button" className="t3-drow" onClick={() => onNavigate('subagents')}>
-              <T3Icon name="bot" size={14} className="t3-drow__ico" />
-              <span className="t3-drow__label">Subagents</span>
-              <span className="t3-drow__meta">{workingAgents > 0 ? `${workingAgents} working` : `${fleet.length}`}</span>
-            </button>
-          )}
-          {todos.length > 0 && (
-            <button
-              type="button"
-              className={`t3-drow${snap.tab === 'plan' ? ' is-selected' : ''}`}
-              aria-pressed={snap.tab === 'plan'}
-              title={snap.tab === 'plan' ? 'Back to conversation' : 'Open Plan & to-dos'}
-              onClick={() => store.setTab(snap.tab === 'plan' ? 'activity' : 'plan')}
-            >
-              <T3Icon name="checkCircle" size={14} className="t3-drow__ico" />
-              <span className="t3-drow__label">Plan &amp; to-dos</span>
-              <span className="t3-drow__meta">{doneTodos}/{todos.length}</span>
-            </button>
-          )}
-          {goal && (
-            <button type="button" className="t3-drow" onClick={() => onNavigate('activity')} title={goal.objective}>
-              <T3Icon name="sparkles" size={14} className="t3-drow__ico" />
-              <span className="t3-drow__label">{goal.objective}</span>
-              <span className="t3-drow__meta">{goal.phase}</span>
-            </button>
-          )}
-        </section>
-      )}
+      {/* Section 3: Workspace Surfaces & Active Xerxes Orchestration */}
+      <section className="t3-dsec">
+        {(snap.swarm?.active || showsImmortalsForSession(snap)) && (
+          <button type="button" className="t3-drow" onClick={() => onNavigate('swarm')}>
+            <T3Icon name="network" size={14} className="t3-drow__ico" />
+            <span className="t3-drow__label">Immortals</span>
+            <span className="t3-drow__meta">
+              {snap.swarm?.active ? `${swarmMemberCounts(snap.swarm.members).working} active` : 'Open'}
+            </span>
+          </button>
+        )}
+        <button type="button" className="t3-drow" onClick={() => onNavigate('docs')}>
+          <T3Icon name="layers" size={14} className="t3-drow__ico" />
+          <span className="t3-drow__label">Artifacts</span>
+          <span className="t3-drow__meta">Open</span>
+        </button>
+        <button type="button" className="t3-drow" onClick={() => onNavigate('terminal')}>
+          <T3Icon name="terminalSquare" size={14} className="t3-drow__ico" />
+          <span className="t3-drow__label">Terminal</span>
+          <span className="t3-drow__meta">
+            {runningTerminals > 0 ? `${runningTerminals} running` : 'Open'}
+          </span>
+        </button>
+        <button type="button" className="t3-drow" onClick={() => onNavigate('activity')}>
+          <T3Icon name="activity" size={14} className="t3-drow__ico" />
+          <span className="t3-drow__label">Activity</span>
+          <span className="t3-drow__meta">{snap.turnActive ? 'Live' : 'Open'}</span>
+        </button>
+        {fleet.length > 0 && (
+          <button type="button" className="t3-drow" onClick={() => onNavigate('subagents')}>
+            <T3Icon name="bot" size={14} className="t3-drow__ico" />
+            <span className="t3-drow__label">Subagents</span>
+            <span className="t3-drow__meta">{workingAgents > 0 ? `${workingAgents} working` : `${fleet.length}`}</span>
+          </button>
+        )}
+        {todos.length > 0 && (
+          <button
+            type="button"
+            className={`t3-drow${snap.tab === 'plan' ? ' is-selected' : ''}`}
+            aria-pressed={snap.tab === 'plan'}
+            title={snap.tab === 'plan' ? 'Back to conversation' : 'Open Plan & to-dos'}
+            onClick={() => store.setTab(snap.tab === 'plan' ? 'activity' : 'plan')}
+          >
+            <T3Icon name="checkCircle" size={14} className="t3-drow__ico" />
+            <span className="t3-drow__label">Plan &amp; to-dos</span>
+            <span className="t3-drow__meta">{doneTodos}/{todos.length}</span>
+          </button>
+        )}
+        {goal && (
+          <button type="button" className="t3-drow" onClick={() => onNavigate('activity')} title={goal.objective}>
+            <T3Icon name="sparkles" size={14} className="t3-drow__ico" />
+            <span className="t3-drow__label">{goal.objective}</span>
+            <span className="t3-drow__meta">{goal.phase}</span>
+          </button>
+        )}
+      </section>
     </aside>
   )
 }

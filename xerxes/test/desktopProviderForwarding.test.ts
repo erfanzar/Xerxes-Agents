@@ -337,3 +337,39 @@ test('a link that drops mid-turn is restored while the turn runs, and the turn f
     expect(f.fallback()).toBe(0)
   }finally{await f.close()}
 },20000)
+
+test('external ACP sessions (live or saved/disconnected) are never bound to local-Mac provider relays', async () => {
+  const profile = { name: 'local-signin', model: 'gpt-4o', supported: true, credential_source: 'local provider authentication or environment', output_limit_mode: 'request-bound' }
+  for (const sessionPatch of [
+    { acp_binding: { connected: true, agent_id: 'antigravity', transport: 'acp' } },
+    { acp_binding: { connected: false, agent_id: 'antigravity', transport: 'acp', error: 'exited' } },
+    { saved_acp_binding: { connected: false, agent_id: 'claude-code', transport: 'stream-json' } },
+  ]) {
+    const remoteCalls: string[] = []
+    const forwarding = new DesktopProviderForwarding(
+      async method => method === 'provider.relay.inventory' ? { ok: true, profiles: [profile] } : { ok: true },
+      async method => {
+        remoteCalls.push(method)
+        return {
+          ok: true,
+          provider_binding_session_guard_supported: true,
+          session: { key: 'acp-task', cwd: '/project', status: 'idle', turn_count: 0, ...sessionPatch },
+        }
+      },
+      'verified-host',
+      '/project',
+      async () => 'local-signin',
+    )
+    try {
+      const review = await forwarding.inspect()
+      expect(review.externalAcp).toBe(true)
+      expect(await forwarding.follow()).toEqual({
+        status: 'skipped',
+        reason: 'this conversation uses an external ACP runtime on the host',
+      })
+      expect(remoteCalls).not.toContain('provider.remote.bind')
+    } finally {
+      await forwarding.disconnect()
+    }
+  }
+})

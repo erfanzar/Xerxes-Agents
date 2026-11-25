@@ -746,6 +746,16 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
       if (type === 'turn_end' && remote && providerForwarding) void followLocalProviders(providerForwarding)
     }, (method, result) => {
       if (session.observe(method, result)) scheduleWindowSave()
+      if ((method === 'initialize' || method === 'session.open') && result && typeof result === 'object') {
+        const sess = (result as { session?: unknown }).session
+        if (sess && typeof sess === 'object' && !Array.isArray(sess)) {
+          const rec = sess as Record<string, unknown>
+          surfaceRecord.hasActiveTurn = Boolean(
+            (typeof rec.active_turn_id === 'string' && rec.active_turn_id !== '')
+            || rec.status === 'working',
+          )
+        }
+      }
       // Opening or starting a conversation on an SSH host: keep it on this
       // computer's sign-in provider (ChatGPT, Claude Code), whose login stays here.
       if ((method === 'initialize' || method === 'session.open') && remote && providerForwarding) void followLocalProviders(providerForwarding)
