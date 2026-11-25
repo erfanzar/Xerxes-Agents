@@ -456,7 +456,7 @@ export function ArtifactsSection({
               }} />
           : isImage
             ? <div className="rsec__image-stage">
-                <ChatImage src={open.content} alt={row.title} />
+                <ChatImage key={row.id} src={open.content} alt={row.title} />
               </div>
           : isHtmlPreview
             ? <div className="rsec__widget-stage">

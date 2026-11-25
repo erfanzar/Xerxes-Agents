@@ -39,7 +39,6 @@ const RETRY_MAX_MS = 5_000
 // remote socket, so a dead remote daemon looks like a connect followed by a
 // close with nothing received. After this many of those in a row the tunnel
 // proves nothing: rebuild it (probe, then bootstrap) instead of re-attaching.
-const SILENT_CLOSE_WINDOW_MS = 5_000
 const SILENT_CLOSE_LIMIT = 2
 // Each remote update check is a whole SSH bootstrap (git ls-remote, maybe a
 // build) and the renderer heartbeat asks every few seconds while work runs.
@@ -212,6 +211,7 @@ export class DaemonRpc extends EventEmitter {
       // A busy host is re-checked every couple of minutes, not on every
       // heartbeat; the person's "restart now" always goes through.
       if (!force && this.remoteBusy && Date.now() < this.remoteBusy.until) return { ...this.remoteBusy.result }
+      const socketBefore = this.socket
       this.remoteUpdatesInFlight += 1
       let result: Record<string, unknown>
       try {
@@ -223,13 +223,12 @@ export class DaemonRpc extends EventEmitter {
       this.silentCloses = 0
       const recheckMs = result.waiting_for_goal_round === true ? REMOTE_GOAL_ROUND_RECHECK_MS : REMOTE_BUSY_RECHECK_MS
       this.remoteBusy = result.ok !== true && result.busy === true ? { result, until: Date.now() + recheckMs } : undefined
-      // During an update SSH may accept a socket that never reaches a daemon.
-      // The host callback can finish before that transient socket's FIN is
-      // delivered, so ensure() would otherwise reuse it and the next read EPIPEs.
-      // Discard only an unverified attachment; never replay any pending call.
-      if (result.ok === true && this.socket && !this.heardSinceAttach) {
-        const transient = this.socket
-        await new Promise<void>(resolve => { transient.once('close', resolve); transient.destroy() })
+      // During an update SSH may keep a pre-restart socket or accept a transient
+      // socket that never reaches the new daemon before FIN arrives. Discard it
+      // and re-attach to the newly restarted remote runtime.
+      if (result.ok === true && this.socket && (this.socket === socketBefore || !this.heardSinceAttach)) {
+        const stale = this.socket
+        await new Promise<void>(resolve => { stale.once('close', resolve); stale.destroy() })
         await this.ensure()
       }
       return result
@@ -440,8 +439,9 @@ export class DaemonRpc extends EventEmitter {
       // A remote update restarts the host's daemon, so the tunnel goes silent
       // on purpose; rebuilding it then would race the update's own bootstrap
       // and, by replacing the connection, cancel that update mid-flight.
-      if (this.externalSocket && this.remoteUpdatesInFlight === 0 && !this.heardSinceAttach
-        && Date.now() - this.attachedAt < SILENT_CLOSE_WINDOW_MS) this.silentCloses += 1
+      // Any closed external socket that never delivered a single byte indicates
+      // a dead/broken tunnel even when TCP close took longer than 5 seconds.
+      if (this.externalSocket && this.remoteUpdatesInFlight === 0 && !this.heardSinceAttach) this.silentCloses += 1
       this.announce(false)
       this.scheduleRetry()
     })

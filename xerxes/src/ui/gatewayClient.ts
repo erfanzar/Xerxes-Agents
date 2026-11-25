@@ -2939,7 +2939,7 @@ async function daemonProcessCommand(pid: number, platform: NodeJS.Platform = pro
           `(Get-CimInstance Win32_Process -Filter "ProcessId=${target}").CommandLine`
         ]
       ] as const)
-    : (['ps', ['-p', String(target), '-o', 'command=']] as const)
+    : (['ps', ['-ww', '-p', String(target), '-o', 'command=']] as const)
   try {
     const { stdout } = await execFileAsync(command, [...args], {
       encoding: 'utf8',

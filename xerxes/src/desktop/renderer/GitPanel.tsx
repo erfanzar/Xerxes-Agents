@@ -55,9 +55,14 @@ export const ANTIGRAVITY_PULL_REQUEST_PROMPT = 'Create a pull request for the cu
 export const ANTIGRAVITY_REVIEW_PROMPT = 'Review the current git changes.'
 export const ANTIGRAVITY_COMMIT_AND_PUSH_PROMPT = 'Commit and push the current changes.'
 
-/** True when the active session is connected to Google Antigravity (`agy acp`). */
-export function isAntigravityAcpSession(snap: Pick<Snapshot, 'acpBinding'>): boolean {
-  return Boolean(snap.acpBinding?.connected && snap.acpBinding.provider === 'antigravity')
+/** True when the active session is connected to or saved for Google Antigravity (`agy acp`). */
+export function isAntigravityAcpSession(
+  snap: Pick<Snapshot, 'acpBinding'> & Partial<Pick<Snapshot, 'savedAcpBinding'>>,
+): boolean {
+  return Boolean(
+    (snap.acpBinding?.connected && snap.acpBinding.provider === 'antigravity')
+    || (snap.savedAcpBinding && snap.savedAcpBinding.provider === 'antigravity'),
+  )
 }
 
 /** Pre-fill the chat composer with an editable plain prompt and focus it without auto-submitting. */
@@ -264,10 +269,11 @@ export function GitPanel({ snap, initialPath = '', expanded = true, onExpand, on
       if (repo.staged.some(f => f.path === path)) return { path, group: 'staged' }
       return null
     }
+    if (!initialPath) linked.current = ''
     if (initialPath && linked.current !== initialPath) {
       linked.current = initialPath
       const hit = find(initialPath)
-      if (hit) { setSelected(hit); return }
+      if (hit) { choose(hit); return }
     }
     setSelected(current => {
       // A file picked from history stays put while the working tree changes.

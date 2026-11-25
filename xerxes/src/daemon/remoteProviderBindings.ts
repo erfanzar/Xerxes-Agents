@@ -192,14 +192,15 @@ export class RemoteProviderBindings {
         if (error) reject(error); else resolve(value)
       }
       const cancel = () => finish(undefined, new LocalProviderRelayError('cancelled'))
-      const timer = setTimeout(() => finish(undefined, new LocalProviderRelayError('grant_unavailable')), this.timeoutMs)
+      const restorable = binding.restorable === true
+      const timer = setTimeout(() => finish(undefined, new LocalProviderRelayError('grant_unavailable', { restorable })), this.timeoutMs)
       timer.unref?.()
       binding.pending.set(id, { settle: value => finish(value), reject: error => finish(undefined, error) })
       signal?.addEventListener('abort', cancel, { once: true })
       if (signal?.aborted) { cancel(); return }
       try {
-        if (!binding.send({ binding: binding.marker.binding, request_id: id, frame })) finish(undefined, new LocalProviderRelayError('grant_unavailable'))
-      } catch { finish(undefined, new LocalProviderRelayError('grant_unavailable')) }
+        if (!binding.send({ binding: binding.marker.binding, request_id: id, frame })) finish(undefined, new LocalProviderRelayError('grant_unavailable', { restorable }))
+      } catch { finish(undefined, new LocalProviderRelayError('grant_unavailable', { restorable })) }
     })
   }
 }

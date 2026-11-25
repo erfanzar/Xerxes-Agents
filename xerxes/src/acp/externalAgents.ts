@@ -34,6 +34,7 @@ export interface AcpExternalAgentInfo {
   readonly available: boolean
   readonly command?: string
   readonly args?: readonly string[]
+  readonly env?: Readonly<Record<string, string>>
   readonly binaryPath?: string
   readonly version?: string
   readonly installHint?: string
@@ -593,6 +594,7 @@ export function discoverExternalAcpAgents(
         available: Boolean(binaryPath),
         command: binaryPath ?? cfg.command,
         ...(cfg.args ? { args: cfg.args } : { args: [] }),
+        ...(cfg.env && Object.keys(cfg.env).length > 0 ? { env: cfg.env } : {}),
         ...(binaryPath ? { binaryPath } : {}),
         ...(binaryPath
           ? {}

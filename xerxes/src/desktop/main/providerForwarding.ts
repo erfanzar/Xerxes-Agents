@@ -48,6 +48,7 @@ export class DesktopProviderForwarding {
   private readonly sessions = new Map<string, Access>()
   private review: Review | undefined
   private lifetime = new AbortController()
+  private generation = 0
   private busy = false
   private following: Promise<FollowResult> | undefined
   private restoreTimer: ReturnType<typeof setTimeout> | undefined
@@ -121,16 +122,22 @@ export class DesktopProviderForwarding {
       if (!this.sessions.has(review.sessionKey) && this.sessions.size >= 128) throw new Error('This window already shares providers with 128 tasks. Revoke unused access first.')
       const fresh = shareableLocalProfiles(await this.local('provider.relay.inventory', {}))
       if (profiles.some(profile => !fresh.some(value => JSON.stringify(value) === JSON.stringify(profile)))) throw new Error('Local provider configuration changed. Review it again.')
+      const restoreModel = restoring && typeof params.restoreModel === 'string' && params.restoreModel.trim()
+        ? params.restoreModel.trim()
+        : undefined
+      const effectiveModelOf = (profile: ShareableLocalProfile, index: number): string =>
+        index === 0 && restoreModel ? restoreModel : profile.model
       const expiresAt = Date.now() + (minutes as number) * 60_000
-      for (const profile of profiles) {
+      for (const [index, profile] of profiles.entries()) {
         signal.throwIfAborted()
+        const model = effectiveModelOf(profile!, index)
         brokers.push(await createLocalProviderBroker(this.local, {consent:true, destination:this.destination, workspace:this.workspace,
-          profile:profile!.name, model:profile!.model, expires_at:expiresAt, max_requests:10000, max_concurrent:16,
+          profile:profile!.name, model, expires_at:expiresAt, max_requests:10000, max_concurrent:16,
           max_output_tokens:profile!.providerControlledOutput ? null : 32768,
           ...(profile!.providerControlledOutput ? {consent_provider_controlled_output:true} : {})}, signal))
       }
       signal.throwIfAborted()
-      const choices = profiles.map((profile,index) => ({source:'local workstation (this desktop window)', profile:profile!.name, model:profile!.model,
+      const choices = profiles.map((profile,index) => ({source:'local workstation (this desktop window)', profile:profile!.name, model:effectiveModelOf(profile!, index),
         ...(brokers[index]!.capabilities ? {capabilities:brokers[index]!.capabilities} : {})}))
       const bound = await this.remote('provider.remote.bind', {consent:true, restorable:true, session_key:review.sessionKey, ...choices[0],
         ...(choices.length > 1 ? {alternatives:choices.slice(1)} : {})})
@@ -140,15 +147,27 @@ export class DesktopProviderForwarding {
         value.workspace !== this.workspace || value.profile !== choices[index]!.profile || value.model !== choices[index]!.model ||
         typeof value.binding !== 'string' || !/^[a-f0-9]{32}$/.test(value.binding))) throw new Error('The remote runtime could not bind local providers. Update it when idle, then review setup again.')
       signal.throwIfAborted()
-      await this.revokeSession(review.sessionKey)
-      signal.throwIfAborted()
+      // Install the replacement bindings BEFORE closing the old brokers so a
+      // remote request arriving immediately after provider.remote.bind returns
+      // never hits a transient grant_unavailable window.
+      const previousAccess = this.sessions.get(review.sessionKey)
       const bindings = markers.map(value => String(value.binding))
+      const bindingSet = new Set(bindings)
       bindings.forEach((binding,index) => {
         this.routes.set(binding,brokers[index]!)
         this.bindingOwners.set(binding,{sessionKey:review.sessionKey, profile:profiles[index]!.name})
       })
       this.sessions.set(review.sessionKey,{brokers,bindings,expiresAt,profiles:profiles.map(profile=>profile!.name)})
       this.changed?.()
+      if (previousAccess) {
+        previousAccess.bindings.forEach(binding => {
+          if (!bindingSet.has(binding)) {
+            this.routes.delete(binding)
+            this.bindingOwners.delete(binding)
+          }
+        })
+        await Promise.all(previousAccess.brokers.map(broker => broker.close().catch(() => undefined)))
+      }
       return {ok:true}
     } catch (error) {
       await Promise.all(brokers.map(broker => broker.close()))
@@ -170,7 +189,11 @@ export class DesktopProviderForwarding {
    */
   follow(): Promise<FollowResult> {
     if (this.following) { this.followAgain = true; return this.following }
+    const gen = this.generation
     this.following = this.followOnce().then(result => {
+      // If disconnect() happened while followOnce() was in flight, never arm a
+      // zombie 15s restoreTimer on a torn-down forwarding instance.
+      if (gen !== this.generation) return result
       // A conversation that should run here but could not be bound again keeps
       // being retried until it is; nothing waits for the person to notice.
       clearTimeout(this.restoreTimer)
@@ -188,7 +211,8 @@ export class DesktopProviderForwarding {
       return result
     }).finally(() => {
       this.following = undefined
-      if (this.followAgain) { this.followAgain = false; void this.follow() }
+      if (this.followAgain && gen === this.generation) { this.followAgain = false; void this.follow() }
+      else if (gen !== this.generation) this.followAgain = false
     })
     return this.following
   }
@@ -241,7 +265,8 @@ export class DesktopProviderForwarding {
       if (!followsHere && await this.useHostSignIn(review.sessionKey, primary)) {
         return { status: 'skipped', reason: `the host has its own ${primary.name} sign-in` }
       }
-      await this.bindPrimary(review, primary, restore)
+      const restoreModel = restore && review.savedRoute?.profile === primary.name ? review.savedRoute.model : undefined
+      await this.bindPrimary(review, primary, restore, restoreModel)
       return { status: 'bound' }
     } catch (error) {
       return { status: 'failed', reason: error instanceof Error ? error.message : String(error) }
@@ -257,6 +282,7 @@ export class DesktopProviderForwarding {
   async useLocal(name: unknown): Promise<{ ok: true }> {
     if (typeof name !== 'string' || !name) throw new Error('Choose a provider profile to run on this computer.')
     const review = await this.inspect()
+    if (review.externalAcp) throw new Error('External ACP conversations run directly on the host and cannot use local Mac provider relaying.')
     const primary = review.profiles.find(profile => profile.name === name)
     if (!primary) {
       // A profile with no model yet is deliberately not shareable, which is a
@@ -344,10 +370,10 @@ export class DesktopProviderForwarding {
     return true
   }
 
-  private async bindPrimary(review: Awaited<ReturnType<DesktopProviderForwarding['inspect']>>, primary: ShareableLocalProfile, restore = false): Promise<void> {
+  private async bindPrimary(review: Awaited<ReturnType<DesktopProviderForwarding['inspect']>>, primary: ShareableLocalProfile, restore = false, restoreModel?: string): Promise<void> {
     this.hostOwn.delete(review.sessionKey)
     const profiles = [primary, ...review.profiles.filter(profile => profile.supported && profile.name !== primary.name)].slice(0, 32)
-    await this.authorize({ consent: true, restore, review: review.review, profiles: profiles.map(profile => profile.name), profile: primary.name,
+    await this.authorize({ consent: true, restore, ...(restoreModel ? { restoreModel } : {}), review: review.review, profiles: profiles.map(profile => profile.name), profile: primary.name,
       minutes: FOLLOW_MINUTES, providerControlledOutput: profiles.some(profile => profile.providerControlledOutput) })
     this.chosen.set(review.sessionKey, primary.name)
     while (this.chosen.size > MAX_ACTIVITY) this.chosen.delete(this.chosen.keys().next().value!)
@@ -407,16 +433,34 @@ export class DesktopProviderForwarding {
       ...(state?.model ? { model: state.model } : {}), ...(state?.lastAt ? { lastAt: state.lastAt } : {}), ...(state?.lastError ? { lastError: state.lastError } : {}) }
   }
 
+  /** True while at least one session holds active local-provider forwarding grants. */
+  hasActiveGrants(): boolean {
+    return this.sessions.size > 0
+  }
+
   /** The open conversation's routing: bound to this computer, live, and what it carried. */
   async current() {
     const response = await this.remote('session.status', { history_limit: 0 })
     const session = record(response.session)
     if (response.ok !== true || typeof session.key !== 'string') return { ok: true, bound: false }
+    const acpBinding = record(session.acp_binding)
+    const savedAcpBinding = record(session.saved_acp_binding)
+    const externalAcp =
+      (acpBinding.connected === true && acpBinding.transport !== 'native')
+      || (typeof acpBinding.agent_id === 'string' && acpBinding.agent_id !== '' && acpBinding.transport !== 'native')
+      || (typeof savedAcpBinding.agent_id === 'string' && savedAcpBinding.agent_id !== '' && savedAcpBinding.transport !== 'native')
+    if (externalAcp) return { ok: true, bound: false, sessionKey: session.key, destination: this.destination }
     const bound = typeof session.local_provider_label === 'string' && session.local_provider_label !== ''
     const activity = this.activityFor(session.key)
     const route = savedRoute(session)
     const host = this.hostOwn.get(session.key)
-    if (!bound && host) return { ok: true, bound: false, sessionKey: session.key, destination: this.destination, onHost: host }
+    const remoteProfile = typeof session.profile_name === 'string' ? session.profile_name : ''
+    if (!bound && host) {
+      if (!remoteProfile || remoteProfile === host.profile) {
+        return { ok: true, bound: false, sessionKey: session.key, destination: this.destination, onHost: host }
+      }
+      this.hostOwn.delete(session.key)
+    }
     return { ok: true, bound, sessionKey: session.key, destination: this.destination, ...activity,
       ...(!activity.profile && route ? { profile: route.profile, model: route.model } : {}),
       // Not live but bound: this window is restoring it and retries until it is back.
@@ -451,7 +495,10 @@ export class DesktopProviderForwarding {
   }
   /** Called on either transport loss and surface closure. Only follow() authorizes again. */
   async disconnect() {
+    this.generation += 1
+    this.followAgain = false
     clearTimeout(this.restoreTimer)
+    this.restoreTimer = undefined
     clearTimeout(this.renewal)
     this.renewal = undefined
     this.review = undefined

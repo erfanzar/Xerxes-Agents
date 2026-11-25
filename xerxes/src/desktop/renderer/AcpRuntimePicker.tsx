@@ -396,9 +396,11 @@ export function AcpRuntimePicker({
   const commandInputRef = useRef<HTMLInputElement>(null)
 
   const binding: AcpSessionBinding | null = isExternalAcpBinding(snap.acpBinding) ? snap.acpBinding : null
-  const activeProvider: AgentBrandProvider = binding ? binding.provider : 'xerxes'
-  const activeId = binding ? binding.agent_id : 'xerxes'
-  const activeLabel = binding ? binding.name : 'Xerxes'
+  const displayBinding: AcpSessionBinding | null =
+    binding ?? (snap.savedAcpBinding && snap.savedAcpBinding.transport !== 'native' ? snap.savedAcpBinding : null)
+  const activeProvider: AgentBrandProvider = displayBinding ? displayBinding.provider : 'xerxes'
+  const activeId = displayBinding ? displayBinding.agent_id : 'xerxes'
+  const activeLabel = displayBinding ? displayBinding.name : 'Xerxes'
   const connecting = Boolean(snap.acpConnecting)
   const online = snap.connection === 'online'
   const agents = useMemo(() => resolveRuntimeList(snap.acpAgents), [snap.acpAgents])

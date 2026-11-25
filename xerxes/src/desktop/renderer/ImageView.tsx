@@ -132,6 +132,7 @@ function ImageLightbox({ url, alt, close }: { url: string; alt: string; close: (
 function Shown({ url, alt }: { url: string; alt: string }): ReactElement {
   const [open, setOpen] = useState(false)
   const [broken, setBroken] = useState(false)
+  useEffect(() => { setBroken(false) }, [url])
   if (broken) return <Unavailable reason="the image data could not be decoded" />
   return (
     <span className="chatimg">

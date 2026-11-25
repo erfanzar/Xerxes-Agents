@@ -2855,6 +2855,13 @@ export function inflightToolContext(name: string, value: unknown): string {
  * frozen wire vocabulary the TUI adapter consumes.
  */
 function recordInflightTrail(session: DaemonSession, event: DaemonEvent): void {
+  if (event.type === "text_part") {
+    const text = stringValue(event.payload.text);
+    if (text) {
+      session.inflightAssistant = (session.inflightAssistant ?? "") + text;
+    }
+    return;
+  }
   if (event.type === "think_part") {
     const think = stringValue(event.payload.think);
     if (think) {

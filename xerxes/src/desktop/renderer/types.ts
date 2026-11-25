@@ -390,6 +390,8 @@ export interface DiffFile {
   readonly isNew: boolean
   readonly hunks: readonly DiffLine[]
   readonly turn: number
+  /** Every turn in this session that edited this file, so earlier FilesChangedCards stay accurate. */
+  readonly turns?: readonly number[]
 }
 
 export interface PlanItem {

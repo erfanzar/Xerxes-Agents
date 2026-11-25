@@ -35,9 +35,10 @@ const LAUNCHABLE = new Set([
   '.deb', '.rpm', '.run', '.bin',
 ])
 
-const escapes = (root: string, target: string): boolean => {
+const escapes = (root: string, target: string, allowRoot = false): boolean => {
   const inside = relative(root, target)
-  return !inside || isAbsolute(inside) || inside.split(sep)[0] === '..'
+  if (!inside) return !allowRoot
+  return isAbsolute(inside) || inside.split(sep)[0] === '..'
 }
 
 function reasonOf(error: unknown): string {
@@ -72,9 +73,13 @@ export async function performFileAction(request: FileActionRequest, port: FileAc
   try {
     const root = await realpath(request.cwd)
     target = await realpath(resolve(root, request.path))
-    if (escapes(root, target)) return { ok: false, error: 'Only files inside this task’s folder can be opened from here.' }
+    if (escapes(root, target, request.action === 'reveal')) return { ok: false, error: 'Only files inside this task’s folder can be opened from here.' }
     const info = await stat(target)
-    if (!info.isFile()) return { ok: false, error: 'Only files can be opened from here.' }
+    if (request.action === 'reveal') {
+      if (!info.isFile() && !info.isDirectory()) return { ok: false, error: 'Only files or folders can be shown from here.' }
+    } else if (!info.isFile()) {
+      return { ok: false, error: 'Only files can be opened from here.' }
+    }
     mode = info.mode
   } catch (error) {
     return { ok: false, error: `Could not find the file: ${reasonOf(error)}.` }

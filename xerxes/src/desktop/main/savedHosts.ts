@@ -123,6 +123,11 @@ export class SavedHostContexts {
     return { machine: remoteTarget({ ...entry.machine, workspacePath: row.cwd }), sessionId: row.id }
   }
 
+  /** Force the next refresh() to re-read machines.json without waiting for the 60s TTL. */
+  invalidate(): void {
+    this.lastRegistry = -Infinity
+  }
+
   /** Immediately evict a removed SSH host alias so the sidebar updates without waiting for the 60s poll. */
   dropAlias(alias: string): void {
     for (const [key, entry] of this.entries) {

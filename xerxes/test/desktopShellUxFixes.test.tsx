@@ -10,6 +10,8 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { ActionDialog } from '../src/desktop/renderer/ActionDialog.js'
 import {
   CONVERSATION_COLUMN_WIDTH,
+  FailedCard,
+  FilesChangedCard,
   QuestionCard,
   Shell,
   THREAD_DETAILS_MIN_GUTTER,
@@ -17,6 +19,7 @@ import {
   isDetailsInlineEligible,
   pruneRailTabsForContext,
 } from '../src/desktop/renderer/App.js'
+import { isAntigravityAcpSession } from '../src/desktop/renderer/GitPanel.js'
 import { AppUpdatePrompt } from '../src/desktop/renderer/AppUpdatePrompt.js'
 import { RASTER_BRAND_MIN_SIZE, RuntimeBrandIcon, XerxesLogoMark } from '../src/desktop/renderer/BrandMark.js'
 import { Markdown, clearMarkdownCache, hasOpenStreamingBlock, splitTableRow } from '../src/desktop/renderer/markdown.js'
@@ -500,5 +503,66 @@ describe('Fix 10: ActionDialog, OutputViewer, FindBar, AppUpdatePrompt, SessionM
     expect(vscodeWelcome).toContain('What should Xerxes do')
     expect(vscodeWelcome).toContain('./logo-128.png')
     expect(vscodeWelcome).not.toContain('data-emblem="xerxes-mark"')
+  })
+})
+
+describe('Fix 11: Production audit UI/UX regressions (ACP saved state, FilesChangedCard, FailedCard, Reveal)', () => {
+  test('isAntigravityAcpSession recognizes disconnected savedAcpBinding and T3ModelPicker displays saved ACP model', () => {
+    const savedAgy = {
+      session_id: 's-agy',
+      agent_id: 'antigravity',
+      name: 'Antigravity',
+      provider: 'antigravity' as const,
+      transport: 'acp' as const,
+      cwd: '/workspace/Xerxes-Agents',
+      connected: false,
+      current_model: 'gemini-3-pro',
+      current_model_name: 'Gemini 3 Pro',
+    }
+    const snap = makeSnapshot({
+      model: 'claude-opus-4-6',
+      acpBinding: null,
+      savedAcpBinding: savedAgy,
+    })
+    expect(isAntigravityAcpSession(snap)).toBe(true)
+
+    stampStyle('vibes')
+    const pickerHtml = renderToStaticMarkup(createElement(T3ModelPicker, { snap }))
+    expect(pickerHtml).toContain('Gemini 3 Pro')
+    expect(pickerHtml).not.toContain('claude-opus')
+  })
+
+  test('FilesChangedCard renders files edited across multiple turns on earlier turn checkpoints', () => {
+    stampStyle('vibes')
+    const html = renderToStaticMarkup(
+      createElement(FilesChangedCard, {
+        group: [{ kind: 'checkpoint', id: 10, turn: 1, adds: 4, dels: 1 }],
+        changes: [
+          {
+            path: '/workspace/Xerxes-Agents/src/app.ts',
+            adds: 9,
+            dels: 2,
+            isNew: false,
+            hunks: [],
+            turn: 2,
+            turns: [1, 2],
+          },
+        ],
+        cwd: '/workspace/Xerxes-Agents',
+      }),
+    )
+    expect(html).toContain('Files changed in turn 1')
+    expect(html).toContain('1 changed file')
+    expect(html).toContain('>src<')
+  })
+
+  test('FailedCard keeps Retry enabled even when failed.lastUser is empty', () => {
+    const html = renderToStaticMarkup(
+      createElement(FailedCard, {
+        failed: { error: 'ACP exited unexpectedly', turn: 3, lastUser: '' },
+      }),
+    )
+    expect(html).toContain('Retry')
+    expect(html).not.toContain('disabled=""')
   })
 })

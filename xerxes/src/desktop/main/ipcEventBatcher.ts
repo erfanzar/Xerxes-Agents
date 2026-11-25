@@ -40,13 +40,13 @@ function stringField(payload: Record<string, unknown>, key: string): string {
   return typeof value === 'string' ? value : ''
 }
 
-/** True when two text/think delta payloads share every non-`text` key and value. */
-function sameNonTextFields(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
+/** True when two text/think delta payloads share every key and value other than `deltaField`. */
+function sameNonTextFields(a: Record<string, unknown>, b: Record<string, unknown>, deltaField: 'text' | 'think'): boolean {
   const aKeys = Object.keys(a)
   const bKeys = Object.keys(b)
   if (aKeys.length !== bKeys.length) return false
   for (const key of aKeys) {
-    if (key === 'text') continue
+    if (key === deltaField) continue
     if (!Object.prototype.hasOwnProperty.call(b, key)) return false
     if (a[key] !== b[key]) return false
   }
@@ -73,8 +73,13 @@ function supersedeKeyOf(type: string, payload: Record<string, unknown>): string 
   return null
 }
 
-function isTextDelta(type: string, payload: Record<string, unknown>): boolean {
-  return (type === 'text_part' || type === 'think_part') && typeof payload.text === 'string'
+function deltaFieldOf(type: string, payload: Record<string, unknown>): 'text' | 'think' | null {
+  if (type === 'text_part' && typeof payload.text === 'string') return 'text'
+  if (type === 'think_part') {
+    if (typeof payload.think === 'string') return 'think'
+    if (typeof payload.text === 'string') return 'text'
+  }
+  return null
 }
 
 export class DaemonEventBatcher {
@@ -110,10 +115,11 @@ export class DaemonEventBatcher {
   push(type: string, payload: Record<string, unknown>): void {
     if (this.disposed) return
 
-    if (isTextDelta(type, payload)) {
+    const deltaField = deltaFieldOf(type, payload)
+    if (deltaField !== null) {
       const last = this.queue.at(-1)
-      if (last && last.type === type && typeof last.payload.text === 'string' && sameNonTextFields(last.payload, payload)) {
-        last.payload = { ...last.payload, text: last.payload.text + (payload.text as string) }
+      if (last && last.type === type && typeof last.payload[deltaField] === 'string' && sameNonTextFields(last.payload, payload, deltaField)) {
+        last.payload = { ...last.payload, [deltaField]: (last.payload[deltaField] as string) + (payload[deltaField] as string) }
         return
       }
       this.enqueue(type, payload)

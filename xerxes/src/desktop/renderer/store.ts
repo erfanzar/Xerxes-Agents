@@ -1925,7 +1925,10 @@ function planItemsOf(markdown: string): PlanItem[] {
 
 /** Does this batched question look like a plan review (approve + revise)? */
 export function isPlanReview(question: import('./types.js').TaskQuestion): boolean {
-  const haystack = [question.items.map(item => `${item.question} ${item.options.join(' ')}`).join(' ')].join(' ').toLowerCase()
+  if (question.items.length !== 1) return false
+  const only = question.items[0]!
+  if (only.allowFreeform === false) return false
+  const haystack = `${only.question} ${only.options.join(' ')}`.toLowerCase()
   return haystack.includes('plan') && (haystack.includes('approve') || haystack.includes('accept'))
 }
 
@@ -1956,25 +1959,35 @@ export function applyInflightTurn(
   const startedAtMs = inflightStartedAtMs(record)
 
   let hydratedUser: string | undefined
+  const existingBlocks = builder.snapshot(true)
+  const existingToolIds = new Set<string>()
+  for (const block of existingBlocks) {
+    if (block.kind === 'tools') {
+      for (const item of block.items) if (item.id) existingToolIds.add(item.id)
+    }
+  }
   if (rawUser && !isLegacyHarnessPrompt(rawUser)) {
     const cleanUser = withoutTurnContext(rawUser)
     if (cleanUser) {
       hydratedUser = cleanUser
-      const last = builder.snapshot(true).at(-1)
-      if (!(last && last.kind === 'user' && last.text === cleanUser)) {
+      if (!existingBlocks.slice(-8).some(block => block.kind === 'user' && block.text === cleanUser)) {
         builder.pushUser(cleanUser)
       }
     }
   }
   if (thinking) {
-    builder.push('think_part', { think: thinking })
+    if (!builder.snapshot(true).slice(-4).some(block => block.kind === 'thinking' && block.text === thinking)) {
+      builder.push('think_part', { think: thinking })
+    }
   }
-  for (const rawTool of tools) {
+  for (const [toolIndex, rawTool] of tools.entries()) {
     if (!rawTool || typeof rawTool !== 'object' || Array.isArray(rawTool)) continue
     const tool = rawTool as Record<string, unknown>
     const name = str(tool.name).trim()
     if (!name) continue
-    const id = str(tool.id).trim() || undefined
+    const id = str(tool.id).trim() || `inflight-${toolIndex}`
+    if (existingToolIds.has(id)) continue
+    existingToolIds.add(id)
     const rawArgs = typeof tool.arguments === 'string' ? tool.arguments.trim() : ''
     const context = str(tool.context).trim()
     let toolArgs: unknown = tool.arguments
@@ -1992,7 +2005,8 @@ export function applyInflightTurn(
       toolArgs = context
     }
     builder.push('tool_call', {
-      ...(id ? { id, tool_call_id: id } : {}),
+      id,
+      tool_call_id: id,
       name,
       ...(toolArgs !== undefined ? { arguments: toolArgs } : {}),
     })
@@ -2003,7 +2017,8 @@ export function applyInflightTurn(
     if (settled) {
       const errorText = str(tool.error) || (tool.ok === false ? 'Tool execution failed.' : '')
       builder.push('tool_result', {
-        ...(id ? { id, tool_call_id: id } : {}),
+        id,
+        tool_call_id: id,
         name,
         ...(typeof tool.duration_ms === 'number' ? { duration_ms: tool.duration_ms } : {}),
         ...(typeof tool.output_preview === 'string' ? { return_value: tool.output_preview } : {}),
@@ -2012,7 +2027,9 @@ export function applyInflightTurn(
     }
   }
   if (assistant) {
-    builder.push('text_part', { text: assistant })
+    if (!builder.snapshot(true).slice(-4).some(block => block.kind === 'agent' && block.text === assistant)) {
+      builder.push('text_part', { text: assistant })
+    }
   }
   const steers = Array.isArray(record.steers)
     ? record.steers.filter((value): value is string => typeof value === 'string')
@@ -2020,8 +2037,8 @@ export function applyInflightTurn(
   for (const rawSteer of steers) {
     const cleanSteer = withoutTurnContext(rawSteer).trim()
     if (!cleanSteer) continue
-    const last = builder.snapshot(true).at(-1)
-    if (!(last && last.kind === 'user' && last.text === cleanSteer)) {
+    const recent = builder.snapshot(true).slice(-4)
+    if (!recent.some(block => block.kind === 'user' && block.text === cleanSteer)) {
       builder.pushUser(cleanSteer)
     }
   }
@@ -2105,7 +2122,7 @@ export class Store {
   private preparingSubmissions = new Map<string, object>()
   private optimisticSubmissions = new Map<string, { text: string; id: number; acknowledged: boolean }>()
   /** `images` are the data URLs shown with the message, whichever path shows it first. */
-  private pendingSteers = new Map<string, { session: string; text: string; images: readonly string[]; shown: boolean; echoed: boolean; blockId?: number }>()
+  private pendingSteers = new Map<string, { session: string; text: string; images: readonly string[]; shown: boolean; echoed: boolean; applied: boolean; rpcSettled: boolean; turnEnded?: boolean; blockId?: number }>()
   private slashResult: { sessionKey: string; text: string } | null = null
   private snippets: Record<string, string> = {}
   private enriching = new Set<string>()
@@ -2124,6 +2141,10 @@ export class Store {
     readonly sandbox?: boolean
   } | null = null
   private foldedToolIds = new Set<string>()
+  private pendingChangeDeltas = new Map<string, Array<{
+    readonly path: string
+    readonly previous: DiffFile | undefined
+  }>>()
   private ttftTotalMs = 0
   private ttftSamples = 0
   private activeMetricTools = new Set<string>()
@@ -2555,6 +2576,7 @@ export class Store {
       ...(agentOverride !== undefined ? { agent: agentOverride } : {}),
     }
     const { isCurrent } = this.captureSessionRequest()
+    this.acpLoadVersion += 1
     this.patch({ acpConnecting: true, acpError: null, acpAuthRequired: false, acpAuthMethods: [] })
     const isAutoInstallableBuiltIn = !custom && (cleanId === 'antigravity' || cleanId === 'claude-code')
     const cachedAgent = this.frame.acpAgents?.find(item => item.id === cleanId)
@@ -2618,6 +2640,7 @@ export class Store {
         binding?.connected && cachedAgent && !cachedAgent.available && this.frame.acpAgents
           ? this.frame.acpAgents.map(item => (item.id === cleanId ? { ...item, available: true } : item))
           : undefined
+      this.acpLoadVersion += 1
       this.patch({
         acpBinding: binding,
         ...(updatedAgents ? { acpAgents: updatedAgents } : {}),
@@ -2628,6 +2651,7 @@ export class Store {
         acpAuthMethods: [],
         ...(binding?.connected && binding.transport !== 'native'
           ? {
+              providerRelay: null,
               modelMenuOpen: false,
               pickerOpen: false,
               reasoningPickerOpen: false,
@@ -2642,6 +2666,7 @@ export class Store {
       })
       if (binding?.connected && binding.transport !== 'native') {
         void this.refreshSwarm({ silent: true })
+        this.refreshProviderRelay()
       }
       return true
     } catch (error) {
@@ -2718,6 +2743,7 @@ export class Store {
     const cleanValue: string | boolean = isBoolean ? value : value.trim()
     if (!isBoolean && !cleanValue) return false
     const { isCurrent } = this.captureSessionRequest()
+    this.acpLoadVersion += 1
     this.patch({ acpError: null })
     try {
       const result = await this.bridge.call(
@@ -2786,6 +2812,7 @@ export class Store {
     const cleanId = modelId.trim()
     if (!cleanId) return false
     const { isCurrent } = this.captureSessionRequest()
+    this.acpLoadVersion += 1
     this.patch({ acpError: null })
     try {
       const result = await this.bridge.call(
@@ -2825,6 +2852,7 @@ export class Store {
     const cleanId = modeId.trim()
     if (!cleanId) return false
     const { isCurrent } = this.captureSessionRequest()
+    this.acpLoadVersion += 1
     this.patch({ acpError: null })
     try {
       const result = await this.bridge.call(
@@ -2862,6 +2890,7 @@ export class Store {
 
   async disconnectAcpAgent(): Promise<boolean> {
     const { isCurrent } = this.captureSessionRequest()
+    this.acpLoadVersion += 1
     this.patch({ acpConnecting: true, acpError: null, acpAuthRequired: false, acpAuthMethods: [] })
     try {
       const result = await this.bridge.call('acp.disconnect', this.swarmParams())
@@ -2871,6 +2900,7 @@ export class Store {
         this.patch({ acpConnecting: false, acpError: err })
         return false
       }
+      this.acpLoadVersion += 1
       this.lastAcpConnect = null
       this.patch({
         acpBinding: null,
@@ -2879,12 +2909,15 @@ export class Store {
         acpError: null,
         acpAuthRequired: false,
         acpAuthMethods: [],
+        approval: null,
+        question: null,
         swarm: null,
         swarmMessages: [],
         swarmInspect: null,
         swarmInspectTarget: null,
       })
       void this.refreshSwarm({ silent: true })
+      this.refreshProviderRelay()
       return true
     } catch (error) {
       if (isCurrent()) {
@@ -2942,6 +2975,7 @@ export class Store {
     options: { readonly cwd?: string; readonly additionalDirectories?: readonly string[] } = {},
   ): Promise<boolean> {
     const { isCurrent } = this.captureSessionRequest()
+    this.acpLoadVersion += 1
     this.patch({ acpError: null })
     try {
       const result = await this.bridge.call(
@@ -3663,7 +3697,10 @@ export class Store {
     }
     this.optimisticSubmissions.set(sessionKey, optimistic)
     this.preparingSubmissions.set(sessionKey, optimistic)
-    this.notify()
+    // Materialize synchronously so an immediate turn_begin sees the optimistic user block.
+    this.frameDirty = true
+    this.materializeFrame()
+    this.emit(true)
     try {
       // A submission id makes a busy session (a goal round, monitor or
       // schedule preparing its turn before turn_begin) refuse the submit
@@ -3816,27 +3853,35 @@ export class Store {
     // echo carries only an image count. Keep the pictures with the pending
     // steer so whichever path shows the message shows them too.
     const shownImages = images.map(image => `data:${image.mediaType};base64,${image.data}`)
-    const pending: { session: string; text: string; images: readonly string[]; shown: boolean; echoed: boolean; blockId?: number } = {
+    const pending: { session: string; text: string; images: readonly string[]; shown: boolean; echoed: boolean; applied: boolean; rpcSettled: boolean; blockId?: number } = {
       session: sessionKey,
       text: cleaned,
       images: shownImages,
       shown: false,
       echoed: false,
+      applied: false,
+      rpcSettled: false,
     }
     this.pendingSteers.set(steerId, pending)
     try {
       const result = await this.bridge.call('turn.steer', { session_key: sessionKey, content: cleaned, client_steer_id: steerId, ...(images.length ? { images: images.map(image => ({ media_type: image.mediaType, data: image.data })) } : {}) })
       if (result.ok === true) {
+        pending.rpcSettled = true
         if (this.sessionKey === sessionKey) {
-          const appliedLive = this.frame.turnActive && (result.disposition === 'live_steer' || !this.pendingSteers.has(steerId))
+          const appliedLive = this.frame.turnActive && (result.disposition === 'live_steer' || pending.applied)
           if (!pending.shown) {
             pending.blockId = this.builder.pushUser(cleaned, false, shownImages)
             pending.shown = true
           }
           if (cleaned) this.recentSteerTexts.add(cleaned)
           if (appliedLive) {
-            this.pendingSteers.delete(steerId)
-            this.notify()
+            // Keep the pending entry until both steer_input and steer_applied
+            // have landed (Electron's IPC event batcher can deliver them after
+            // this RPC reply), so neither echo pushes a duplicate user bubble.
+            if (pending.echoed && pending.applied) this.pendingSteers.delete(steerId)
+            this.frameDirty = true
+            this.materializeFrame()
+            this.emit(true)
           } else if (this.frame.turnActive) {
             this.queue = [
               ...this.queue,
@@ -3848,13 +3893,23 @@ export class Store {
               },
             ]
             this.patch({ queue: this.queue })
+          } else if (result.disposition === 'live_steer' || result.disposition === 'queued_steer') {
+            // External ACP steer was accepted as live_steer or queued_steer (which
+            // automatically launches a continuation); do not show a false "task finished" notice.
+            if (pending.echoed && pending.applied) this.pendingSteers.delete(steerId)
+            this.frameDirty = true
+            this.materializeFrame()
+            this.emit(true)
           } else {
             // The turn ended while this steer was in flight; turn_end came
             // first. The daemon kept the text for the next turn but started
             // none, so a "queued" entry would wait for a reply forever.
+            this.pendingSteers.delete(steerId)
             this.builder.push('notification', { severity: 'info', message: 'The task finished before this message reached it. It is saved and goes with your next message.' })
             this.notify()
           }
+        } else {
+          this.pendingSteers.delete(steerId)
         }
         return true
       } else {
@@ -3924,32 +3979,36 @@ export class Store {
       ? this.queue.filter(item => options.preserveQueueIds!.has(item.id))
       : [...this.queue]
     this.steeringNow = true
+    const hadPendingInteraction = Boolean(this.frame.approval || this.frame.question)
     try {
       if (this.stopArmTimer !== undefined) {
         clearTimeout(this.stopArmTimer)
         this.stopArmTimer = undefined
       }
-      if (this.frame.stopArmed || this.frame.approval || this.frame.question) {
-        this.patch({ stopArmed: false, approval: null, question: null })
+      if (this.frame.stopArmed) {
+        this.patch({ stopArmed: false })
       }
       // Antigravity (`agy acp 1.5+`) supports native live mid-turn steering via
       // `turn.steer({ live: true })`. Never send `turn.cancel` before trying live
       // steer — cancelling a mid-step `agy` tool call can corrupt the trajectory.
+      // Skip live steer when promoting an already-queued durable steer so
+      // `turn.cancel({ drop_pending_steers: true })` removes it atomically.
       if (
+        !options?.promotedFromQueue &&
+        !hadPendingInteraction &&
         this.frame.acpBinding?.connected &&
-        this.frame.acpBinding.provider === 'antigravity' &&
-        !this.frame.approval &&
-        !this.frame.question
+        this.frame.acpBinding.provider === 'antigravity'
       ) {
         const steerId = crypto.randomUUID()
         const shownImages = images.map(image => `data:${image.mediaType};base64,${image.data}`)
-        const pending: { session: string; text: string; images: readonly string[]; shown: boolean; echoed: boolean; blockId?: number } = {
+        const pending: { session: string; text: string; images: readonly string[]; shown: boolean; echoed: boolean; applied: boolean; rpcSettled: boolean; blockId?: number } = {
           session: sessionKey,
           text: cleaned,
           images: shownImages,
-          shown: Boolean(options?.promotedFromQueue),
+          shown: false,
           echoed: false,
-          ...(options?.promotedBlockId !== undefined ? { blockId: options.promotedBlockId } : {}),
+          applied: false,
+          rpcSettled: false,
         }
         this.pendingSteers.set(steerId, pending)
         const liveRes = await this.bridge.call('turn.steer', {
@@ -3960,18 +4019,30 @@ export class Store {
           ...(images.length ? { images: images.map(image => ({ media_type: image.mediaType, data: image.data })) } : {}),
         })
         if (liveRes.ok === true && liveRes.disposition === 'live_steer') {
-          this.pendingSteers.delete(steerId)
+          pending.rpcSettled = true
           if (this.sessionKey === sessionKey) {
             if (!pending.shown) {
               pending.blockId = this.builder.pushUser(cleaned, false, shownImages)
               pending.shown = true
             }
             if (cleaned) this.recentSteerTexts.add(cleaned)
-            this.notify()
+            if (pending.echoed && pending.applied) this.pendingSteers.delete(steerId)
+            this.frameDirty = true
+            this.materializeFrame()
+            this.emit(true)
+          } else {
+            this.pendingSteers.delete(steerId)
           }
           return true
         }
         this.pendingSteers.delete(steerId)
+        if (pending.shown && pending.blockId !== undefined && this.sessionKey === sessionKey) {
+          this.builder.removeBlockById(pending.blockId)
+          this.notify()
+        }
+      }
+      if (this.frame.approval || this.frame.question) {
+        this.patch({ approval: null, question: null })
       }
       await this.bridge.call('turn.cancel', { session_key: sessionKey, drop_pending_steers: true })
       const settled = await this.waitForTurnState(sessionKey, false, 4500)
@@ -4004,7 +4075,11 @@ export class Store {
           removedQueuedBubble = true
         }
       }
-      if (removedQueuedBubble) this.notify()
+      if (removedQueuedBubble) {
+        this.frameDirty = true
+        this.materializeFrame()
+        this.emit(true)
+      }
       const ok = await this.submit(cleaned, undefined, images)
       if (ok && remaining.length > 0 && this.sessionKey === sessionKey) {
         const started = await this.waitForTurnState(sessionKey, true, 1500)
@@ -4012,11 +4087,25 @@ export class Store {
           for (const item of remaining) {
             await this.steer(item.text, item.images ?? [])
           }
+        } else if (this.sessionKey === sessionKey) {
+          // If the promoted turn finished before remaining follow-ups could re-queue, submit them sequentially.
+          for (const item of remaining) {
+            await this.submit(item.text, undefined, item.images ?? [])
+          }
         }
+      } else if (!ok && options?.promotedFromQueue && this.sessionKey === sessionKey) {
+        this.queue = priorQueue
+        this.patch({ queue: this.queue })
       }
       return ok
     } catch (error) {
-      if (this.sessionKey === sessionKey) this.fail(error)
+      if (this.sessionKey === sessionKey) {
+        if (options?.promotedFromQueue) {
+          this.queue = priorQueue
+          this.patch({ queue: this.queue })
+        }
+        this.fail(error)
+      }
       return false
     } finally {
       this.steeringNow = false
@@ -4283,8 +4372,11 @@ export class Store {
           return true
         }
       }
-      if (this.frame.turnActive) this.patch({ error: error instanceof Error ? error.message : String(error) })
-      else this.fail(error)
+      if (this.frame.turnActive) this.patch({ navigating: null, error: error instanceof Error ? error.message : String(error) })
+      else {
+        this.patch({ navigating: null })
+        this.fail(error)
+      }
       // A failed open still left the connection re-keyed or the UI in an error
       // state; treat it as a move rather than resurrecting stale captures.
       return true
@@ -4398,22 +4490,30 @@ export class Store {
    * conversation remains selected with the error visible.
    */
   private beginFreshTask(agentPreset?: string): Promise<boolean> {
-    if (this.openingSession || this.frame.turnActive || this.frame.connection !== 'online') return Promise.resolve(false)
+    if (this.openingSession || this.openingFreshTask || this.frame.turnActive || this.frame.connection !== 'online') return Promise.resolve(false)
+    const version = ++this.sessionNavigationVersion
     const sessionKey = `desktop-${Math.random().toString(36).slice(2, 10)}`
     this.openingFreshTask = true
     this.patch({ connection: 'connecting', navigating: 'fresh' })
-    return this.initialize({ session_key: sessionKey, ...(agentPreset ? { agent_id: agentPreset } : {}) })
+    const run = this.initialize({ session_key: sessionKey, ...(agentPreset ? { agent_id: agentPreset } : {}) })
       .then(() => {
+        if (version !== this.sessionNavigationVersion) return false
         void this.refreshGoal()
         void this.refreshSessions()
         return true
       })
       .catch(error => {
-        this.patch({ connection: 'online' })
-        this.fail(error)
+        if (version === this.sessionNavigationVersion) {
+          this.patch({ connection: 'online', navigating: null })
+          this.fail(error)
+        }
         return false
       })
-      .finally(() => { this.openingFreshTask = false })
+      .finally(() => {
+        if (version === this.sessionNavigationVersion) this.openingFreshTask = false
+      })
+    this.sessionNavigation = run.then(() => undefined, () => undefined)
+    return run
   }
 
   private planTimer: ReturnType<typeof setTimeout> | undefined
@@ -4522,7 +4622,10 @@ export class Store {
       .then(result => {
         if (!isCurrent()) return
         if (result.ok === false) {
-          this.builder.push('notification', { severity: 'error', message: str(result.error) || 'answer refused' })
+          const message = str(result.error) || 'answer refused'
+          const stale = !this.frame.turnActive || /no pending|not found|expired|already|unknown/i.test(message)
+          if (stale) this.patch({ question: null })
+          this.builder.push('notification', { severity: 'error', message })
           this.notify()
         } else {
           this.patch({ question: null })
@@ -5714,7 +5817,6 @@ export class Store {
     if (!failed) return
     this.failure = null
     this.patch({ failed: null, turnFailed: false, tab: 'activity' })
-    if (!failed.lastUser) return
     const isExternalAcpSession =
       this.isExternalAcpConnected()
       || Boolean(this.frame.savedAcpBinding && this.frame.savedAcpBinding.transport !== 'native')
@@ -6259,9 +6361,9 @@ export class Store {
   private openingFreshTask = false
   private supportsConnectionLease = false
   async retryConnection(): Promise<void> {
-    if (this.reconnecting || this.openingFreshTask || this.openingSession) return
+    if (this.reconnecting || this.openingFreshTask || this.openingSession || this.updatingRuntime) return
     this.reconnecting = true
-    this.patch({ connection: 'connecting' })
+    this.patch({ connection: 'connecting', navigating: null })
     // Resume the open conversation by id when one exists — a bare
     // initialize evicts the live session and the daemon would hand back a
     // fresh, context-free one under our key.
@@ -6572,6 +6674,16 @@ export class Store {
         this.historyBefore = page.before
         this.patch({ historyMore: page.has_more })
       }
+      if (!this.lastUser) {
+        const blocks = this.builder.snapshot(this.frame.turnActive)
+        for (let i = blocks.length - 1; i >= 0; i -= 1) {
+          const block = blocks[i]!
+          if (block.kind === 'user' && block.text.trim()) {
+            this.lastUser = block.text.trim()
+            break
+          }
+        }
+      }
     } catch (error) {
       if (generation === this.historyGeneration && key === this.sessionKey) this.patch({ historyError: error instanceof Error ? error.message : String(error) })
     } finally {
@@ -6626,10 +6738,32 @@ export class Store {
       }
     }
     if (!extra.resume_session_id && !preserveLiveTranscript) this.adoptHistory(session)
+    if (!preserveLiveTranscript) {
+      this.preparingSubmissions.clear()
+      this.optimisticSubmissions.clear()
+    }
     const reportedContextLimit = num(result.context_limit)
     const contextLimit = reportedContextLimit !== null && reportedContextLimit > 0
       ? reportedContextLimit
       : null
+    // Replay missed lease frames BEFORE reconciling/finalizing the turn so
+    // streamed text_part/tool_result/turn_end events land on the live runs
+    // instead of spawning orphan post-finalize blocks.
+    const resolvedInteractionIds = new Set<string>()
+    if (preserveLiveTranscript && replay && replay.length > 0) {
+      for (const raw of replay) {
+        const frame = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {}
+        const params = frame.params && typeof frame.params === 'object' ? frame.params as Record<string, unknown> : {}
+        if (frame.method === 'event' && typeof params.type === 'string' && params.payload && typeof params.payload === 'object') {
+          const evPayload = params.payload as Record<string, unknown>
+          if (params.type === 'approval_response' || params.type === 'question_response' || params.type === 'question_resolved') {
+            const rid = str(evPayload.request_id) || str(evPayload.id)
+            if (rid) resolvedInteractionIds.add(rid)
+          }
+          this.onEvent({ type: params.type, payload: evPayload })
+        }
+      }
+    }
     // The daemon owns turn truth (`active_turn_id` exists only mid-turn).
     // A fold that still believes it is acting after a restart or reconnect
     // would show ▶ act forever with blinking carets on finished messages —
@@ -6637,9 +6771,15 @@ export class Store {
     const daemonInTurn = str(session.active_turn_id) !== ''
     const inflightStartedAt = daemonInTurn ? inflightStartedAtMs(session.inflight) : null
     if (daemonInTurn && !this.frame.turnActive) this.startTurn(inflightStartedAt ?? undefined)
-    if (!daemonInTurn && this.frame.turnActive) {
-      this.stopTick()
-      this.builder.finalize()
+    if (!daemonInTurn) {
+      if (this.frame.turnActive) {
+        this.stopTick()
+        this.builder.finalize()
+      }
+      this.queue = []
+      this.pendingSteers.clear()
+      this.pendingAgentCalls.clear()
+      this.activeMetricTools.clear()
     }
     const resolvedTurnStartedAt = daemonInTurn
       ? (inflightStartedAt ?? this.frame.turnStartedAt ?? Date.now())
@@ -6668,8 +6808,11 @@ export class Store {
       costBasis: (result.cost_basis ?? session.cost_basis) === 'subscription' ? 'subscription' : null,
       contextMax: contextLimit,
       approval: null,
-      ...(this.frame.currentId !== str(result.session_id ?? session.id) ? { question: null, goal: '' } : {}),
-      ...(daemonInTurn ? { turnStartedAt: resolvedTurnStartedAt, turnSeconds: resolvedTurnSeconds } : { turnActive: false, turnSeconds: 0, turnStartedAt: null }),
+      question: null,
+      ...(this.frame.currentId !== str(result.session_id ?? session.id) ? { goal: '' } : {}),
+      ...(daemonInTurn
+        ? { turnStartedAt: resolvedTurnStartedAt, turnSeconds: resolvedTurnSeconds }
+        : { turnActive: false, turnSeconds: 0, turnStartedAt: null, queue: this.queue, liveFocus: null, networkRetrying: false }),
       // initialize reports THIS session's policy — /permissions pins the
       // mode per session, so the daemon-wide runtime.status would lie about
       // what the next tool call will actually face.
@@ -6677,19 +6820,13 @@ export class Store {
       ...this.telemetryFromSession(session),
     })
     this.adoptFleet(session)
-      this.adoptTodos(session)
-    if (preserveLiveTranscript) {
-      for (const raw of replay ?? []) {
-        const frame = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {}
-        const params = frame.params && typeof frame.params === 'object' ? frame.params as Record<string, unknown> : {}
-        if (frame.method === 'event' && typeof params.type === 'string' && params.payload && typeof params.payload === 'object') {
-          this.onEvent({ type: params.type, payload: params.payload as Record<string, unknown> })
-        }
-      }
-    }
+    this.adoptTodos(session)
     for (const raw of Array.isArray(result.pending_interactions) ? result.pending_interactions : []) {
       if (raw && typeof raw === 'object' && (raw.type === 'approval_request' || raw.type === 'question_request') && raw.payload && typeof raw.payload === 'object') {
-        this.onEvent({ type: raw.type, payload: raw.payload as Record<string, unknown> })
+        const pendingPayload = raw.payload as Record<string, unknown>
+        const rid = str(pendingPayload.request_id) || str(pendingPayload.id)
+        if (rid && resolvedInteractionIds.has(rid)) continue
+        this.onEvent({ type: raw.type, payload: pendingPayload })
       }
     }
     this.loadSkillSuggestions()
@@ -7279,10 +7416,11 @@ export class Store {
           : !isConnectedExternal && statusError && this.frame.acpBinding && this.frame.acpBinding.transport !== 'native'
             ? { ...this.frame.acpBinding, connected: false }
             : undefined
+      this.acpLoadVersion += 1
       this.patch({
         acpBinding: isConnectedExternal ? binding : null,
         ...(isConnectedExternal
-          ? { savedAcpBinding: null }
+          ? { savedAcpBinding: null, providerRelay: null }
           : fallbackSaved !== undefined
             ? { savedAcpBinding: fallbackSaved }
             : {}),
@@ -7290,6 +7428,7 @@ export class Store {
         acpError: statusError,
         acpAuthRequired: statusAuthRequired,
         acpAuthMethods: statusAuthRequired ? statusAuthMethods : [],
+        ...(!isConnectedExternal && wasExternal ? { approval: null, question: null } : {}),
         ...(agents ? { acpAgents: agents } : {}),
         ...(isConnectedExternal
           ? {
@@ -7311,6 +7450,7 @@ export class Store {
       })
       if (runtimeTransitioned) {
         void this.refreshSwarm({ silent: true })
+        this.refreshProviderRelay()
       }
       return
     }
@@ -7357,16 +7497,28 @@ export class Store {
         if (user) {
           const cleanUser = withoutTurnContext(user).trim()
           const unprefixed = /^user:\s+/i.test(cleanUser) ? cleanUser.replace(/^user:\s+/i, '').trim() : ''
+          const continuationLines = cleanUser.includes('\n')
+            ? cleanUser.split('\n').map(line => line.trim()).filter(Boolean)
+            : []
+          const matchesJoinedSteers =
+            continuationLines.length > 1
+            && continuationLines.every(line => {
+              const stripped = /^user:\s+/i.test(line) ? line.replace(/^user:\s+/i, '').trim() : line
+              return this.recentSteerTexts.has(line) || this.recentSteerTexts.has(stripped)
+            })
           const matchesRecentSteer = Boolean(
-            (cleanUser && this.recentSteerTexts.has(cleanUser))
+            matchesJoinedSteers
+            || (cleanUser && this.recentSteerTexts.has(cleanUser))
             || (unprefixed && this.recentSteerTexts.has(unprefixed)),
           )
           const displayUser = unprefixed && matchesRecentSteer ? unprefixed : cleanUser
           this.lastUser = displayUser
-          const last = this.frame.blocks.at(-1)
+          // Read live materialized blocks so optimistic bubbles pushed before rAF are never missed.
+          const currentBlocks = this.getSnapshot().blocks
+          const last = currentBlocks.at(-1)
           const optimistic = this.optimisticSubmissions.get(this.sessionKey)
           const matchesOptimistic = Boolean(optimistic && (optimistic.text === user || optimistic.text === displayUser))
-          const alreadyShown = matchesOptimistic && this.frame.blocks.some(block => block.kind === 'user' && block.id === optimistic!.id && (block.text === user || block.text === displayUser))
+          const alreadyShown = matchesOptimistic && currentBlocks.some(block => block.kind === 'user' && block.id === optimistic!.id && (block.text === user || block.text === displayUser))
           if (matchesOptimistic && optimistic) {
             optimistic.acknowledged = true
             this.optimisticSubmissions.delete(this.sessionKey)
@@ -7374,13 +7526,20 @@ export class Store {
           const alreadyAtTail = Boolean(
             last && last.kind === 'user' && (last.text === user || last.text === displayUser || (unprefixed && last.text === unprefixed)),
           )
+          const recentBlocks = currentBlocks.slice(-8)
           const alreadyQueuedNearTail = Boolean(
-            (matchesRecentSteer || Boolean(unprefixed))
-            && this.frame.blocks.slice(-4).some(block => block.kind === 'user' && (block.text === displayUser || (unprefixed && block.text === unprefixed))),
+            matchesJoinedSteers
+            || ((matchesRecentSteer || Boolean(unprefixed))
+              && recentBlocks.some(block => block.kind === 'user' && (block.text === displayUser || (unprefixed && block.text === unprefixed)))),
           )
           if (matchesRecentSteer) {
             this.recentSteerTexts.delete(displayUser)
             if (cleanUser) this.recentSteerTexts.delete(cleanUser)
+            for (const line of continuationLines) {
+              this.recentSteerTexts.delete(line)
+              const stripped = /^user:\s+/i.test(line) ? line.replace(/^user:\s+/i, '').trim() : line
+              this.recentSteerTexts.delete(stripped)
+            }
           }
           // A prompt the harness wrote (goal round, monitor, schedule) is not
           // something the user said, so it is not shown.
@@ -7389,6 +7548,9 @@ export class Store {
           }
         }
         this.preparingSubmissions.delete(this.sessionKey)
+        for (const [id, steer] of this.pendingSteers) {
+          if (steer.session === this.sessionKey && steer.turnEnded) this.pendingSteers.delete(id)
+        }
         // A late delta that landed after the previous turn_end sits in the
         // scratch runs; left alone it re-enters the stream as a "live" block
         // of THIS turn. Drain it committed before the tail opens.
@@ -7466,10 +7628,25 @@ export class Store {
         if (type === 'tool_result') {
           // A foreground agent's terminal status lands with its result:
           // refresh now, then let the poll die once nothing agent-side runs.
-          const id = str(payload.tool_call_id)
+          const id = str(payload.tool_call_id) || str(payload.id)
           if (id) {
             this.pendingAgentCalls.delete(id)
             this.activeMetricTools.delete(id)
+            if (payload.permitted === false || payload.error) {
+              const snapshots = this.pendingChangeDeltas.get(id)
+              if (snapshots) {
+                this.pendingChangeDeltas.delete(id)
+                this.foldedToolIds.delete(id)
+                for (let i = snapshots.length - 1; i >= 0; i -= 1) {
+                  const snapEntry = snapshots[i]!
+                  if (snapEntry.previous) this.changes.set(snapEntry.path, snapEntry.previous)
+                  else this.changes.delete(snapEntry.path)
+                }
+                this.patch({ changes: [...this.changes.values()].sort((a, b) => a.path.localeCompare(b.path)) })
+              }
+            } else {
+              this.pendingChangeDeltas.delete(id)
+            }
           }
           if (payload.permitted !== false && !payload.error && (!id || !this.foldedToolIds.has(id))) {
             const resultDiffs = parseStructuredDiffs(payload.diffs, payload.diff)
@@ -7555,19 +7732,27 @@ export class Store {
         const metricToolId = str(payload.tool_call_id) || str(payload.id)
         if (callDiffs.length > 1) {
           let foldedAny = false
+          const rollback: Array<{ readonly path: string; readonly previous: DiffFile | undefined }> = []
           for (const entry of callDiffs) {
             const entryStats = editStatsOf(payload.name, {}, entry, payload.locations)
             if (entryStats) {
               foldedAny = true
+              rollback.push({ path: entryStats.path, previous: this.changes.get(entryStats.path) })
               this.foldChange(entryStats, {}, str(payload.name), entry)
             }
           }
-          if (foldedAny && metricToolId) this.foldedToolIds.add(metricToolId)
+          if (foldedAny && metricToolId) {
+            this.foldedToolIds.add(metricToolId)
+            this.pendingChangeDeltas.set(metricToolId, rollback)
+          }
         } else {
           const structuredDiff = callDiffs[0] ?? null
           const stats = editStatsOf(payload.name, parsedCallArgs, structuredDiff, payload.locations)
           if (stats) {
-            if (metricToolId) this.foldedToolIds.add(metricToolId)
+            if (metricToolId) {
+              this.foldedToolIds.add(metricToolId)
+              this.pendingChangeDeltas.set(metricToolId, [{ path: stats.path, previous: this.changes.get(stats.path) }])
+            }
             this.foldChange(stats, parsedCallArgs, str(payload.name), structuredDiff)
           }
         }
@@ -7597,29 +7782,42 @@ export class Store {
         return
       }
       case 'steer_applied': {
-        // The model has the steer now: it is no longer queued. Match by text,
-        // one queued entry per applied steer, oldest first.
+        // The model has the steer now: it is no longer queued. Match by exact text
+        // first before falling back to @-mention expansion prefix/suffix match.
         const contents = Array.isArray(payload.contents) ? payload.contents.filter((value): value is string => typeof value === 'string') : []
         if (!contents.length) break
+        const isExpandedSteerMatch = (raw: string, applied: string): boolean =>
+          raw !== '' && (applied === raw || applied.startsWith(`${raw}\n`) || applied.startsWith(`${raw} `) || applied.includes(`<attached_files>`) && applied.includes(raw))
         let queue = this.queue
         let shownOther = false
         for (const content of contents) {
-          const trimmed = content.trim()
-          if (trimmed) this.recentSteerTexts.add(trimmed)
           const text = content.trim()
+          if (text) this.recentSteerTexts.add(text)
           let ours = false
-          const index = queue.findIndex(item => item.text === text)
+          let index = queue.findIndex(item => item.text === text)
+          if (index < 0) index = queue.findIndex(item => isExpandedSteerMatch(item.text, text))
           if (index >= 0) { queue = [...queue.slice(0, index), ...queue.slice(index + 1)]; ours = true }
-          for (const [id, steer] of this.pendingSteers) {
-            // @-mentions expand the applied text, so a pending steer contained in it is still ours.
-            if (steer.session === this.sessionKey && (steer.text === text || (steer.text !== '' && text.includes(steer.text)))) { this.pendingSteers.delete(id); ours = true; break }
+          const pendingEntries = [...this.pendingSteers.entries()].filter(([, steer]) => steer.session === this.sessionKey && !steer.applied)
+          const matchedPending =
+            pendingEntries.find(([, steer]) => steer.text === text)
+            ?? pendingEntries.find(([, steer]) => isExpandedSteerMatch(steer.text, text))
+          if (matchedPending) {
+            const [id, steer] = matchedPending
+            steer.applied = true
+            if (!steer.shown && text) {
+              steer.blockId = this.builder.pushUser(text, false, steer.images)
+              steer.shown = true
+              shownOther = true
+            }
+            if (steer.rpcSettled && (steer.echoed || steer.turnEnded) && steer.applied) this.pendingSteers.delete(id)
+            ours = true
           }
           // A steer from the phone, the Hub or another client: its acceptance echo went only to the
           // sender, so this is the first time this window hears of it. Show it where the model saw it.
           if (!ours && text) { this.builder.pushUser(text); shownOther = true }
         }
         if (queue !== this.queue) { this.queue = queue; this.patch({ queue }) }
-        else if (shownOther) this.notify()
+        else if (shownOther) { this.frameDirty = true; this.materializeFrame(); this.emit(true) }
         return
       }
       case 'steer_input': {
@@ -7628,9 +7826,14 @@ export class Store {
         // silently at the next step boundary. The mirror therefore lives
         // until turn_end, which is the one boundary we do observe.
         const content = str(payload.content)
-        if (!content) return
+        const trimmedContent = content.trim()
+        if (!trimmedContent) return
         const id = str(payload.client_steer_id)
-        const pending = id ? this.pendingSteers.get(id) : [...this.pendingSteers.values()].find(item => item.session === this.sessionKey && item.text === content && !item.echoed)
+        const byId = id ? this.pendingSteers.get(id) : undefined
+        const matchedEntry = byId && byId.session === this.sessionKey
+          ? ([id, byId] as const)
+          : [...this.pendingSteers.entries()].find(([, item]) => item.session === this.sessionKey && item.text === trimmedContent && !item.echoed)
+        const pending = matchedEntry?.[1]
         if (pending) pending.echoed = true
         if (!pending?.shown) {
           const blockId = this.builder.pushUser(content, false, pending?.images ?? [])
@@ -7638,7 +7841,12 @@ export class Store {
             pending.shown = true
             pending.blockId = blockId
           }
-          this.notify()
+          this.frameDirty = true
+          this.materializeFrame()
+          this.emit(true)
+        }
+        if (matchedEntry && pending && pending.rpcSettled && pending.echoed && pending.applied) {
+          this.pendingSteers.delete(matchedEntry[0])
         }
         return
       }
@@ -7887,7 +8095,7 @@ export class Store {
       // Every window showing the request hears its answer, including one
       // answered from another window or the TUI: the card is dead from then on.
       case 'question_response': {
-        const id = str(payload.id)
+        const id = str(payload.id) || str(payload.request_id)
         if (this.frame.question?.requestId === id) this.patch({ question: null })
         return
       }
@@ -7912,7 +8120,18 @@ export class Store {
         return
       }
       case 'turn_end': {
-        for (const [id, steer] of this.pendingSteers) if (steer.session === this.sessionKey) this.pendingSteers.delete(id)
+        const stopReasonEarly = typeof payload.stop_reason === 'string' ? payload.stop_reason : ''
+        for (const [id, steer] of this.pendingSteers) {
+          if (steer.session !== this.sessionKey || !steer.rpcSettled) continue
+          if (steer.applied || stopReasonEarly === 'cancelled') {
+            this.pendingSteers.delete(id)
+          } else {
+            // Keep unapplied queued steers alive across turn_end so the
+            // immediate post-turn continuation `steer_applied` event recognizes
+            // them as ours instead of pushing duplicate user bubbles.
+            steer.turnEnded = true
+          }
+        }
         this.preparingSubmissions.delete(this.sessionKey)
         // Plan mode: whatever the agent reasoned toward in text is the plan
         // artifact — capture it before the buffer resets for the next turn.
@@ -8044,6 +8263,8 @@ export class Store {
           { kind: 'hunk' as const, text: `@@ … (${combinedHunks.length - MAX_DIFF_LINES_PER_FILE + 1} lines truncated) @@` },
         ]
       : combinedHunks
+    const prevTurns = previous ? (previous.turns ?? [previous.turn]) : []
+    const turns = prevTurns.includes(this.turnCount) ? prevTurns : [...prevTurns, this.turnCount]
     const merged: DiffFile = {
       path: stats.path,
       adds: (previous?.adds ?? 0) + stats.adds,
@@ -8051,6 +8272,7 @@ export class Store {
       isNew: previous?.isNew ?? (stats.isNew || normalizeToolName(name) === 'writefile'),
       hunks: boundedHunks,
       turn: this.turnCount,
+      turns,
     }
     this.changes.set(stats.path, merged)
     // A new edit during review reopens the surface — "Keep all" is an
@@ -8099,6 +8321,8 @@ export class Store {
    * connection, and `setPermissionMode` early-returns while its flag is set.
    */
   private resetInFlightRequests(): void {
+    this.preparingSubmissions.clear()
+    this.optimisticSubmissions.clear()
     this.patch({
       reasoningPickerOpen: false,
       reasoningLoading: false,
@@ -8112,9 +8336,11 @@ export class Store {
   private resetWorkspaceFolds(): void {
     this.resetInFlightRequests()
     this.queue = []
+    this.pendingSteers.clear()
     this.recentSteerTexts.clear()
     this.changes.clear()
     this.foldedToolIds.clear()
+    this.pendingChangeDeltas.clear()
     this.turnStartTotals = { adds: 0, dels: 0 }
     this.logRing = []
     this.logView = []
@@ -8169,6 +8395,7 @@ export class Store {
       plan: null,
       todos: null,
       liveFocus: null,
+      compacting: undefined,
       failed: null,
       turnCount: 0,
       turnFailed: false,
@@ -8227,6 +8454,7 @@ export class Store {
     this.patch({
       turnActive: true, networkRetrying: false,
       liveFocus: null,
+      failed: null,
       turnFailed: false,
       turnSeconds: Math.max(0, Math.floor((now - anchor) / 1000)),
       turnStartedAt: anchor,

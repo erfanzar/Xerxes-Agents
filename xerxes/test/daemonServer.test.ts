@@ -2502,7 +2502,7 @@ test("daemon saves named sessions, steers with /steer, and routes /btw as an eph
     });
     expect(
       (await client.next(eventFrame("steer_input"))).params?.payload,
-    ).toEqual({ content: "keep the title" });
+    ).toMatchObject({ content: "keep the title" });
     expect(
       (await client.next(eventFrame("notification"))).params?.payload,
     ).toMatchObject({ category: "slash", body: "Steer accepted." });
@@ -3696,7 +3696,7 @@ test("daemon resumes only initialize resume IDs and lists saved sessions separat
       ok: true,
       daemon_protocol: 35,
       daemon_build_id: expect.any(String),
-      daemon_version: "0.8.58",
+      daemon_version: "0.8.59",
       provider_account_isolation_v1_supported: true,
       session: { id: firstSessionId, key: firstSessionId, messages: 2 },
     });
@@ -3814,7 +3814,7 @@ test("daemon implements native completion, slash, steering, mode, and provider c
     });
     expect(
       (await client.next(eventFrame("steer_input"))).params?.payload,
-    ).toEqual({ content: "keep it concise" });
+    ).toMatchObject({ content: "keep it concise" });
     client.send({
       jsonrpc: "2.0",
       id: 5,
@@ -5125,7 +5125,7 @@ test("daemon applies queued steering at a native runner boundary", async () => {
     });
     expect(
       (await client.next(eventFrame("steer_input"))).params?.payload,
-    ).toEqual({ content: "focus tests" });
+    ).toMatchObject({ content: "focus tests" });
     runner.release();
     expect(
       (await client.next(eventFrame("text_part"))).params?.payload,

@@ -1757,6 +1757,9 @@ export class AcpStdioClient {
       if (decision.outcome === 'selected' && decision.optionId) {
         return decision
       }
+      if (decision.outcome === 'cancelled') {
+        return decision
+      }
       return defaultDenyPermission(request)
     } catch {
       return defaultDenyPermission(request)

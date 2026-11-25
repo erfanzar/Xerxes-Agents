@@ -75,7 +75,7 @@ export function latestSessionIn(rows: readonly ContextSession[], folder: string)
   return rows.find(row => inFolder(row.cwd, folder))?.id
 }
 export function sameRemote(left: RemoteTarget | null | undefined, right: RemoteTarget): boolean {
-  return left?.target === right.target && left.workspacePath === right.workspacePath
+  return Boolean(left) && left!.target === right.target && cleanFolder(left!.workspacePath) === cleanFolder(right.workspacePath)
 }
 /** Keep remote/local session identities separate; live state wins within one endpoint. */
 export function contextSessions(saved: unknown, live: unknown): ContextSession[] {

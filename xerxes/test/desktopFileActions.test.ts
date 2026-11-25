@@ -34,6 +34,13 @@ test('open and reveal resolve inside the task folder, symlinks included', async 
     expect(await performFileAction({ action: 'open', path: 'out', cwd: workspace }, port)).toMatchObject({ ok: false, error: expect.stringContaining('Only files') })
     expect(await performFileAction({ action: 'open', path: 'gone.pdf', cwd: workspace }, port)).toMatchObject({ ok: false, error: expect.stringContaining('no longer exists') })
     expect(calls.length).toBe(2)
+    // Reveal allows showing the workspace root or a child folder in Finder, while still rejecting escapes.
+    expect(await performFileAction({ action: 'reveal', path: '.', cwd: workspace }, port)).toEqual({ ok: true })
+    expect(await performFileAction({ action: 'reveal', path: 'out', cwd: workspace }, port)).toEqual({ ok: true })
+    expect(await performFileAction({ action: 'reveal', path: '..', cwd: workspace }, port)).toMatchObject({ ok: false, error: expect.stringContaining('inside this task') })
+    const realRoot = await realpath(workspace)
+    const realOut = await realpath(join(workspace, 'out'))
+    expect(calls.slice(2)).toEqual([`reveal ${realRoot}`, `reveal ${realOut}`])
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 

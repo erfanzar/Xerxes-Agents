@@ -204,14 +204,17 @@ export function useTranscriptScroll(
     lastScrollTop.current = maxTop
   }, [syncPinned])
 
-  const loadOlder = useCallback(async (): Promise<void> => {
+  const loadOlder = useCallback(async (preservePinned = false): Promise<void> => {
     if (pendingPromise.current) return pendingPromise.current
     const element = ref.current
     if (!element || pending.current || currentOptions.current.loading || !currentOptions.current.more) return
     const run = (async (): Promise<void> => {
       pending.current = true
-      syncPinned(false)
-      lastFollowTop.current = null
+      const wasPinned = following.current
+      if (!preservePinned) {
+        syncPinned(false)
+        lastFollowTop.current = null
+      }
       const identity = session.current
       const anchor = captureHistoryScrollAnchor(element)
       try {
@@ -223,8 +226,15 @@ export function useTranscriptScroll(
           const grew = element.scrollHeight - anchor.scrollHeight >= VISIBLE_GROWTH_PX
           if (grew || !currentOptions.current.more || currentOptions.current.automatic === false) break
         }
-        element.scrollTop = restoreHistoryScrollAnchor(element, anchor)
-        lastScrollTop.current = clampScrollPosition(element)
+        if (preservePinned && wasPinned && following.current) {
+          const maxTop = Math.max(0, element.scrollHeight - element.clientHeight)
+          element.scrollTop = maxTop
+          lastFollowTop.current = maxTop
+          lastScrollTop.current = maxTop
+        } else {
+          element.scrollTop = restoreHistoryScrollAnchor(element, anchor)
+          lastScrollTop.current = clampScrollPosition(element)
+        }
       } finally {
         pending.current = false
         pendingPromise.current = null
@@ -305,7 +315,7 @@ export function useTranscriptScroll(
       lastScrollTop.current = clampedTop
       lastFollowTop.current = decision.nextLastFollowTop
       syncPinned(decision.following)
-      if (!decision.following && clampedTop <= prevTop && clampedTop < 160 && currentOptions.current.automatic !== false) {
+      if (!decision.following && clampedTop < prevTop && clampedTop < 160 && currentOptions.current.automatic !== false) {
         void loadOlder()
       }
     }
@@ -377,7 +387,7 @@ export function useTranscriptScroll(
       currentOptions.current.automatic !== false
     ) {
       filledFor.current = sessionId
-      void loadOlder()
+      void loadOlder(true)
     }
   })
 

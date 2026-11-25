@@ -33,10 +33,23 @@ export function registerDaemonBridge(target: WebContents, daemon?: DaemonRpc, ob
       if (params !== undefined && params !== null && (typeof params !== 'object' || Array.isArray(params))) throw new TypeError('params must be an object')
       const current = connections.get(event.sender.id)
       if (!current) throw new Error('Choose a workspace folder before using runtime features')
-      if (name === 'desktop.restartRuntime') return current.restartRuntime((params as Record<string, unknown> | undefined)?.allow_legacy === true, (params as Record<string, unknown> | undefined)?.force === true)
+      const flushSender = () => {
+        if (connections.get(event.sender.id) === current) batchers.get(event.sender.id)?.batcher.flush()
+      }
+      if (name === 'desktop.restartRuntime') {
+        return current.restartRuntime((params as Record<string, unknown> | undefined)?.allow_legacy === true, (params as Record<string, unknown> | undefined)?.force === true)
+          .then(result => { flushSender(); return result }, error => { flushSender(); throw error })
+      }
       return current.call(name, (params ?? {}) as Record<string, unknown>).then(result => {
+        // Flush any buffered daemon events emitted during this RPC before the
+        // IPC reply reaches the renderer so steer_input/status_update/text_part
+        // frames preserve strict wire ordering relative to RPC replies.
+        flushSender()
         if (connections.get(event.sender.id) === current) results.get(event.sender.id)?.(name, result)
         return result
+      }, error => {
+        flushSender()
+        throw error
       })
     })
   }

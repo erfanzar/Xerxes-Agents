@@ -1704,6 +1704,7 @@ export class DaemonServer {
   private readonly acpBackgroundTasks = new Map<string, Map<string, AgyBackgroundTaskSnapshot>>();
   private readonly acpWakeupIdleMs: number;
   private readonly acpOutOfTurnWakeups = new Map<string, AcpOutOfTurnWakeupState>();
+  private readonly startingAcpTurnSessions = new Set<string>();
   private readonly activeAcpTurnRecorders = new Map<string, AcpTurnTranscriptRecorder>();
   private readonly acpApprovalOptionChoices = new Map<string, string>();
   private readonly acpNonPermanentApprovals = new Set<string>();
@@ -2031,6 +2032,8 @@ export class DaemonServer {
         void this.runtime.flushSessions().catch(() => undefined);
       }
       if (!binding.connected) {
+        this.acpBackgroundTasks.delete(sessionId);
+        this.agyBrainBridge.unwatchSession(sessionId);
         void this.settleAcpOutOfTurnWakeup(sessionId, "end_turn");
       } else if (live && isAntigravityBinding(binding)) {
         this.ensureAgySwarmWatch(live);
@@ -4670,6 +4673,7 @@ export class DaemonServer {
         });
         if (outcome.ok === true && outcome.duplicate !== true) {
           this.emit(connection, "steer_input", {
+            ...(session ? { session_id: session.id } : {}),
             content,
             ...(images.length ? { image_count: images.length } : {}),
             ...(clientSteerId ? { client_steer_id: clientSteerId } : {}),
@@ -4685,6 +4689,9 @@ export class DaemonServer {
       ) {
         if (!processed.enhancedMessage.trim() && !images.length) {
           return { ok: false, error: "No session or steering text to apply" };
+        }
+        if (session.cancelRequested) {
+          return { ok: false, error: "Turn was cancelled" };
         }
         const submissionId = optionalString(params.submission_id)?.trim();
         const digest = submissionDigest(processed.enhancedMessage, "", "steer", images);
@@ -4718,6 +4725,7 @@ export class DaemonServer {
               }
             }
             this.emit(connection, "steer_input", {
+              session_id: session.id,
               content,
               ...(images.length ? { image_count: images.length } : {}),
               ...(clientSteerId ? { client_steer_id: clientSteerId } : {}),
@@ -4746,6 +4754,7 @@ export class DaemonServer {
             ...(images.length ? { images } : {}),
             onAccepted: recordLiveSteerAccepted,
             onFallbackQueue: async () => {
+              if (session.cancelRequested) return;
               await this.queueDurableSteer({
                 session,
                 text: processed.enhancedMessage,
@@ -4754,6 +4763,18 @@ export class DaemonServer {
                 submissionId,
                 digest,
               });
+              if (
+                !this.sessionBusy(key, session) &&
+                !this.acpBridgeHost.hasActiveTurn(session.id) &&
+                !this.acpOutOfTurnWakeups.has(session.id) &&
+                !session.cancelRequested
+              ) {
+                this.scheduleSteerContinuation(
+                  key,
+                  (event) => this.emit(connection, event.type, event.payload),
+                  connection,
+                );
+              }
             },
           });
           if (liveOutcome.ok) {
@@ -4764,6 +4785,9 @@ export class DaemonServer {
               ...(submissionId ? { submission_id: submissionId } : {}),
               ...(session.activeTurnId ? { turn_id: session.activeTurnId } : {}),
             };
+          }
+          if (session.cancelRequested) {
+            return { ok: false, error: "Turn was cancelled" };
           }
         }
         const outcome = await this.queueDurableSteer({
@@ -4776,6 +4800,7 @@ export class DaemonServer {
         });
         if (outcome.ok === true) {
           this.emit(connection, "steer_input", {
+            session_id: session.id,
             content,
             ...(images.length ? { image_count: images.length } : {}),
             ...(clientSteerId ? { client_steer_id: clientSteerId } : {}),
@@ -4783,12 +4808,25 @@ export class DaemonServer {
               ? { mentioned_files: processed.mentionedFiles }
               : {}),
           });
+          if (
+            !this.sessionBusy(key, session) &&
+            !this.acpBridgeHost.hasActiveTurn(session.id) &&
+            !this.acpOutOfTurnWakeups.has(session.id) &&
+            !session.cancelRequested
+          ) {
+            this.scheduleSteerContinuation(
+              key,
+              (event) => this.emit(connection, event.type, event.payload),
+              connection,
+            );
+          }
         }
         return outcome;
       }
       const ok = this.runtime.steerTurn(key, processed.enhancedMessage, images);
       if (ok) {
         this.emit(connection, "steer_input", {
+          ...(session ? { session_id: session.id } : {}),
           content,
           ...(images.length ? { image_count: images.length } : {}),
           ...(clientSteerId ? { client_steer_id: clientSteerId } : {}),
@@ -8045,6 +8083,10 @@ export class DaemonServer {
           this.acpBridgeHost.hasActiveBridge(session.id) &&
           (this.acpBridgeHost.hasActiveTurn(session.id) || this.sessionBusy(key, session))
         ) {
+          if (session.cancelRequested) {
+            this.emitSlash(connection, "Turn was cancelled.", "warning");
+            return { ok: false, error: "Turn was cancelled" };
+          }
           const outcome = await this.queueDurableSteer({
             session,
             text: processed.enhancedMessage,
@@ -8055,11 +8097,24 @@ export class DaemonServer {
           });
           if (outcome.ok === true) {
             this.emit(connection, "steer_input", {
+              session_id: session.id,
               content: args,
               ...(processed.mentionedFiles.length
                 ? { mentioned_files: processed.mentionedFiles }
                 : {}),
             });
+            if (
+              !this.sessionBusy(key, session) &&
+              !this.acpBridgeHost.hasActiveTurn(session.id) &&
+              !this.acpOutOfTurnWakeups.has(session.id) &&
+              !session.cancelRequested
+            ) {
+              this.scheduleSteerContinuation(
+                key,
+                (event) => this.emit(connection, event.type, event.payload),
+                connection,
+              );
+            }
           }
           this.emitSlash(
             connection,
@@ -8074,6 +8129,7 @@ export class DaemonServer {
         );
         if (steered) {
           this.emit(connection, "steer_input", {
+            ...(session ? { session_id: session.id } : {}),
             content: args,
             ...(processed.mentionedFiles.length
               ? { mentioned_files: processed.mentionedFiles }
@@ -10221,6 +10277,7 @@ export class DaemonServer {
       // A persistent compressing state, not a transient notice: the TUI
       // shows a spinner until the compaction result arrives.
       this.emit(notify, "status_update", {
+        session_id: session.id,
         kind: "compressing",
         text: `Compacting ${session.messages.length} message(s) with ${model}…`,
       });
@@ -10234,6 +10291,7 @@ export class DaemonServer {
         completion: async request => {
           summaryRequest += 1;
           if (notify) this.emit(notify, 'status_update', {
+            session_id: session.id,
             kind: 'compressing', text: `Compacting: summary request ${summaryRequest}…`,
           });
           return completion.port(request);
@@ -12816,6 +12874,7 @@ export class DaemonServer {
         ...(hub ? resolutionEventFields(resolution) : {}),
       });
       acpQuestion.resolve(rawAnswers);
+      this.touchAcpOutOfTurnWakeup(acpQuestion.sessionId);
       return { ok: true };
     }
     const ok = this.interactions.respondQuestion(requestId, answers);
@@ -13825,6 +13884,9 @@ export class DaemonServer {
         session.cancelRequested = true;
         this.turnOwners.delete(session.sessionKey);
       }
+      if (this.acpOutOfTurnWakeups.has(session.id)) {
+        void this.settleAcpOutOfTurnWakeup(session.id, "cancelled");
+      }
       this.cancelQueuedSteers(session.sessionKey, "turn-cancelled");
     }
     return nativeCancelled + acpCancelled;
@@ -14700,6 +14762,9 @@ export class DaemonServer {
 
   /** True when an Antigravity session has live background subagents or tasks on disk/in flight. */
   private hasActiveAgyBackgroundWork(session: DaemonSession): boolean {
+    if (!this.acpBridgeHost.hasActiveBridge(session.id)) {
+      return false;
+    }
     const loc = this.resolveAgyBrainLocationForSession(session);
     if (loc) {
       const subagents = this.agyBrainBridge.listSubagentSnapshotsSync(loc);
@@ -15818,6 +15883,17 @@ export class DaemonServer {
     if (target.session) {
       if (activeExternal) {
         target.session.metadata.acp_binding = activeExternal;
+        if (Object.hasOwn(target.session.metadata, LOCAL_PROVIDER_BINDING)) {
+          try {
+            this.remoteProviderBindings?.useRemote(target.session);
+          } catch {
+            // If a native relay request is still draining, leave live binding intact until it settles.
+          }
+          if (!this.remoteProviderBindings) {
+            delete target.session.metadata[LOCAL_PROVIDER_BINDING];
+            delete target.session.metadata.local_provider_profile;
+          }
+        }
       } else {
         delete target.session.metadata.acp_binding;
         delete target.session.extra.acp_context;
@@ -16710,15 +16786,20 @@ export class DaemonServer {
   }
 
   private createAcpPermissionHandler(input: {
+    readonly activeQuestionIds?: Set<string> | undefined;
     readonly deniedToolCallIds?: Set<string> | undefined;
     readonly effectivePermissionMode: string;
     readonly emit: (event: DaemonEvent) => void;
     readonly session: DaemonSession;
     readonly signal?: AbortSignal | undefined;
-  }): (req: AcpClientPermissionRequest) => Promise<AcpClientPermissionResponse> {
-    const { session, emit, effectivePermissionMode, deniedToolCallIds, signal } = input;
-    return async (req: AcpClientPermissionRequest): Promise<AcpClientPermissionResponse> => {
-      if (signal?.aborted) {
+  }): (req: AcpClientPermissionRequest, permSignal?: AbortSignal) => Promise<AcpClientPermissionResponse> {
+    const { session, emit, effectivePermissionMode, activeQuestionIds, deniedToolCallIds, signal } = input;
+    return async (
+      req: AcpClientPermissionRequest,
+      permSignal?: AbortSignal,
+    ): Promise<AcpClientPermissionResponse> => {
+      const waitSignal = permSignal ?? signal;
+      if (waitSignal?.aborted) {
         return { outcome: "cancelled" };
       }
       const activeBinding = this.acpBridgeHost.getBinding(session.id);
@@ -16744,6 +16825,7 @@ export class DaemonServer {
             title: optionLabels[idx]!,
           })),
         };
+        activeQuestionIds?.add(requestId);
         const rawAnswers = await new Promise<
           Readonly<Record<string, string | readonly string[]>> | null
         >((resolveAnswer) => {
@@ -16751,6 +16833,7 @@ export class DaemonServer {
             const pending = this.pendingAcpQuestions.get(requestId);
             if (!pending) return;
             this.pendingAcpQuestions.delete(requestId);
+            activeQuestionIds?.delete(requestId);
             pending.signal?.removeEventListener("abort", pending.abort);
             this.questionOwners.delete(requestId);
             this.pendingInteractionFrames.delete(requestId);
@@ -16760,13 +16843,13 @@ export class DaemonServer {
             abort,
             resolve: resolveAnswer,
             sessionId: session.id,
-            signal,
+            signal: waitSignal,
             specs: [spec],
             title: questionText,
             toolCallId: req.toolCallId,
           });
-          signal?.addEventListener("abort", abort, { once: true });
-          if (signal?.aborted) {
+          waitSignal?.addEventListener("abort", abort, { once: true });
+          if (waitSignal?.aborted) {
             abort();
             return;
           }
@@ -16788,7 +16871,8 @@ export class DaemonServer {
             },
           });
         });
-        if (rawAnswers === null || signal?.aborted) {
+        activeQuestionIds?.delete(requestId);
+        if (rawAnswers === null || waitSignal?.aborted) {
           return { outcome: "cancelled" };
         }
         const rawChoice = rawAnswers[req.toolCallId];
@@ -16883,7 +16967,7 @@ export class DaemonServer {
               },
             },
           },
-          signal,
+          waitSignal,
         );
         chosenOptionId = this.acpApprovalOptionChoices.get(requestId);
       } finally {
@@ -16893,10 +16977,15 @@ export class DaemonServer {
         }
         this.acpApprovalOptionChoices.delete(requestId);
         this.acpNonPermanentApprovals.delete(requestId);
+        if (waitSignal?.aborted) {
+          this.approvalOwners.delete(requestId);
+          this.pendingInteractionFrames.delete(requestId);
+        }
       }
-      if (signal?.aborted) {
+      if (waitSignal?.aborted) {
         return { outcome: "cancelled" };
       }
+      this.touchAcpOutOfTurnWakeup(session.id);
       const matchedOption = chosenOptionId
         ? req.options.find((opt) => opt.optionId === chosenOptionId)
         : undefined;
@@ -16924,11 +17013,19 @@ export class DaemonServer {
     emit: (event: DaemonEvent) => void,
     options: SubmitTurnOptions,
   ): Promise<void> {
-    // Flush any autonomous post-settle coordinator wakeup before starting an explicit turn.
-    await this.settleAcpOutOfTurnWakeup(session.id, "end_turn");
+    // Block new out-of-turn wakeups from spawning while settling any prior wakeup and initializing this turn.
+    this.startingAcpTurnSessions.add(session.id);
+    try {
+      // Flush any autonomous post-settle coordinator wakeup before starting an explicit turn.
+      await this.settleAcpOutOfTurnWakeup(session.id, "end_turn");
+    } catch (error) {
+      this.startingAcpTurnSessions.delete(session.id);
+      throw error;
+    }
     const turnId = crypto.randomUUID();
     const displayText = options.displayText ?? text;
     session.activeTurnId = turnId;
+    this.startingAcpTurnSessions.delete(session.id);
     session.status = "working";
     session.cancelRequested = false;
     session.lastActive = Date.now();
@@ -17013,6 +17110,7 @@ export class DaemonServer {
           session,
           emit,
           effectivePermissionMode,
+          activeQuestionIds: activeAcpQuestionIds,
           deniedToolCallIds,
           signal: options.signal,
         }),
@@ -17368,6 +17466,9 @@ export class DaemonServer {
 
       stopReason = result.stopReason;
       cancelled = result.cancelled;
+      if (result.error) {
+        turnError = turnError ?? result.error;
+      }
 
       // Persist chronological user + steer + assistant + tool steps onto the session
       // transcript so history, reload, diffs, pagination, and `/btw` preserve full content.
@@ -17944,12 +18045,18 @@ export class DaemonServer {
     >,
   ): void {
     if (this.runtimeShutdown) return;
-    // Never interleave with an explicit user-submitted turn.
-    if (this.acpBridgeHost.hasActiveTurn(session.id)) return;
+    // Never interleave with an explicit user-submitted turn or one being initialized.
+    if (
+      this.startingAcpTurnSessions.has(session.id) ||
+      this.turnOwners.has(session.sessionKey) ||
+      this.acpBridgeHost.hasActiveTurn(session.id)
+    ) {
+      return;
+    }
     const existing = this.acpOutOfTurnWakeups.get(session.id);
     if (!existing && session.activeTurnId) return;
-    // Ignore bare empty continuation heartbeats when no wakeup turn is open.
-    if (!existing && event.type === "continuation" && !event.text?.trim()) return;
+    // Ignore bare continuation heartbeats when no wakeup turn is open; real text arrives via text_delta.
+    if (!existing && event.type === "continuation") return;
 
     const accepts = (conn: DaemonTransportConnection): boolean =>
       this.runtime.sessionStatus(conn.activeSessionKey)?.id === session.id;
@@ -18012,14 +18119,8 @@ export class DaemonServer {
         break;
       }
       case "continuation": {
-        if (event.text) {
-          wakeup.recorder.addText(event.text);
-          session.inflightAssistant = `${session.inflightAssistant ?? ""}${event.text}`;
-          broadcastWake("text_part", {
-            session_id: session.id,
-            text: event.text,
-          });
-        }
+        // Pure liveness heartbeat: `normalizeAcpSessionUpdate` already emits `text_delta`
+        // for any text content, so never append or broadcast text again here.
         break;
       }
       case "tool_call": {
@@ -18254,6 +18355,13 @@ export class DaemonServer {
     this.scheduleAcpOutOfTurnSettle(wakeup);
   }
 
+  private touchAcpOutOfTurnWakeup(sessionId: string): void {
+    const wakeup = this.acpOutOfTurnWakeups.get(sessionId);
+    if (wakeup) {
+      this.scheduleAcpOutOfTurnSettle(wakeup);
+    }
+  }
+
   private scheduleAcpOutOfTurnSettle(wakeup: AcpOutOfTurnWakeupState): void {
     if (wakeup.settleTimer !== undefined) {
       clearTimeout(wakeup.settleTimer);
@@ -18264,7 +18372,10 @@ export class DaemonServer {
       : this.acpWakeupIdleMs;
     wakeup.settleTimer = setTimeout(() => {
       wakeup.settleTimer = undefined;
-      if (this.hasPendingAcpInteraction(wakeup.sessionId)) {
+      if (
+        this.hasPendingAcpInteraction(wakeup.sessionId) ||
+        (wakeup.pendingToolCallIds.size > 0 && this.acpBridgeHost.hasActiveBridge(wakeup.sessionId))
+      ) {
         this.scheduleAcpOutOfTurnSettle(wakeup);
         return;
       }
@@ -18300,7 +18411,8 @@ export class DaemonServer {
       });
     }
     session.turnCount += 1;
-    if (session.activeTurnId === wakeup.turnId) {
+    const ownedActiveTurn = session.activeTurnId === wakeup.turnId;
+    if (ownedActiveTurn) {
       session.activeTurnId = "";
       session.status = "idle";
       delete session.inflightUser;
@@ -18318,7 +18430,8 @@ export class DaemonServer {
       console.error(`Could not persist autonomous ACP coordinator wakeup: ${errorMessage(error)}`);
     });
 
-    if (!this.runtimeShutdown) {
+    const supersededByActiveTurn = Boolean(session.activeTurnId && session.activeTurnId !== wakeup.turnId);
+    if (!this.runtimeShutdown && !supersededByActiveTurn) {
       const accepts = (conn: DaemonTransportConnection): boolean =>
         this.runtime.sessionStatus(conn.activeSessionKey)?.id === session.id;
       const wakeEndPayload: JsonRpcPayload = {
@@ -18336,6 +18449,19 @@ export class DaemonServer {
       );
       this.emitSessionAttention(session, { type: "turn_end", payload: wakeEndPayload });
       this.notifySessionStateChanged(session.id);
+    }
+    if (
+      !this.runtimeShutdown &&
+      stopReason !== "cancelled" &&
+      !this.startingAcpTurnSessions.has(session.id) &&
+      !session.activeTurnId &&
+      hasQueuedSteers(session.metadata)
+    ) {
+      this.scheduleSteerContinuation(
+        session.sessionKey,
+        this.createOutOfTurnAcpEmitter(session),
+        undefined,
+      );
     }
   }
 

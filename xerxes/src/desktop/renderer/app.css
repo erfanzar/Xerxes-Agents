@@ -1547,6 +1547,7 @@ details[open] > summary::marker { content: "▾\00a0\00a0"; }
 .decision-dock {
   position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%);
   z-index: var(--z-dock, 135); width: min(84ch, calc(100vw - 48px));
+  max-height: calc(100dvh - 40px); overflow-y: auto;
   box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45); border-radius: var(--r-sm);
 }
 .decision-dock > .approval, .decision-dock > .qcard { margin: 0; max-width: none; width: 100%; }

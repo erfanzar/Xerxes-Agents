@@ -43,7 +43,7 @@ const result = await prepareManagedRuntime(
       try {
         const pid = Number((await Bun.file(daemonPaths(projectDir).pidPath).text()).trim());
         if (!Number.isSafeInteger(pid) || pid <= 0) return undefined;
-        const command = Bun.spawnSync(['ps', '-o', 'command=', '-p', String(pid)]).stdout.toString();
+        const command = Bun.spawnSync(['ps', '-ww', '-o', 'command=', '-p', String(pid)]).stdout.toString();
         return /\bdaemon\b/.test(command) && /xerxes|cli\.js/i.test(command) ? pid : undefined;
       } catch { return undefined; }
     },

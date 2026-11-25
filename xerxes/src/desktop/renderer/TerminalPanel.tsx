@@ -59,6 +59,8 @@ function terminalTheme(host: HTMLElement): ITheme {
   }
 }
 
+const terminalAttachCounts = new Map<string, number>()
+
 export function TerminalPanel({ snap }: { snap: Snapshot }): ReactElement {
   const [shells, setShells] = useState<ShellRow[] | null>(null)
   const [active, setActive] = useState('')
@@ -92,7 +94,18 @@ export function TerminalPanel({ snap }: { snap: Snapshot }): ReactElement {
   const [attempt, setAttempt] = useState(0)
   const online = snap.connection === 'online'
   useEffect(() => {
-    if (!online) return
+    setShells(null)
+    setActive('')
+    setSplit(null)
+    setError('')
+    started.current = false
+  }, [snap.sessionKey, snap.cwd])
+
+  useEffect(() => {
+    if (!online) {
+      setShells(null)
+      return
+    }
     let current = true
     setError('')
     void call('terminal.list').then(result => {
@@ -239,6 +252,8 @@ function XtermView({ snap, terminalId, visible, onExit, clears = 0, onFocusPane,
   useEffect(() => {
     const element = host.current
     if (!element) return
+    const attachKey = `${snap.sessionKey}:${terminalId}`
+    terminalAttachCounts.set(attachKey, (terminalAttachCounts.get(attachKey) ?? 0) + 1)
     let alive = true
     setLinkError(null)
     setPendingLink(null)
@@ -348,7 +363,13 @@ function XtermView({ snap, terminalId, visible, onExit, clears = 0, onFocusPane,
       themeWatch.disconnect()
       input.dispose()
       unsubscribe()
-      void call('terminal.detach').catch(() => {})
+      const remainingMounts = Math.max(0, (terminalAttachCounts.get(attachKey) ?? 1) - 1)
+      if (remainingMounts === 0) {
+        terminalAttachCounts.delete(attachKey)
+        void call('terminal.detach').catch(() => {})
+      } else {
+        terminalAttachCounts.set(attachKey, remainingMounts)
+      }
       xterm.dispose()
       term.current = null
       fit.current = null

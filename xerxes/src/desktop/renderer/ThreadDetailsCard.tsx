@@ -69,15 +69,26 @@ export function ThreadDetailsCard({
   readonly onOpenTerminal: () => void
 }): ReactElement {
   const cardRef = useRef<HTMLElement>(null)
+  const gitReqRef = useRef(0)
   const [repo, setRepo] = useState<GitRepoSummary | null>(null)
   const [creatingWorktree, setCreatingWorktree] = useState(false)
   const [worktreeName, setWorktreeName] = useState('')
   const [openMenu, setOpenMenu] = useState<'open' | 'git' | null>(null)
 
+  useEffect(() => {
+    gitReqRef.current += 1
+    setRepo(null)
+    setOpenMenu(null)
+    setCreatingWorktree(false)
+    setWorktreeName('')
+  }, [snap.cwd, snap.sessionKey])
+
   const refreshGit = useCallback(async () => {
     if (!snap.cwd || snap.connection !== 'online') return
+    const req = ++gitReqRef.current
     try {
       const result = await desktopCall(window.xerxes, snap.sessionKey, 'git.status', {})
+      if (req !== gitReqRef.current) return
       const status = result.repository as ScmStatus | null | undefined
       if (status !== undefined) store.syncBranch(status?.branch ?? '')
       if (!status) {
@@ -92,7 +103,7 @@ export function ThreadDetailsCard({
         files,
       })
     } catch {
-      setRepo(null)
+      if (req === gitReqRef.current) setRepo(null)
     }
   }, [snap.cwd, snap.sessionKey, snap.connection])
 
@@ -106,11 +117,21 @@ export function ThreadDetailsCard({
     return () => window.removeEventListener('focus', onFocus)
   }, [refreshGit])
 
+  const hasGlobalModal = Boolean(
+    snap.wsMenuOpen ||
+    snap.settingsOpen ||
+    snap.paletteOpen ||
+    snap.searchOpen ||
+    snap.taskModalOpen ||
+    snap.sessionMenu,
+  )
+
   useEffect(() => {
     const hasNested = creatingWorktree || openMenu !== null
     if (mode === 'inline' && !hasNested) return
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') {
+        if (hasGlobalModal) return
         event.preventDefault()
         event.stopPropagation()
         if (creatingWorktree) {
@@ -139,7 +160,7 @@ export function ThreadDetailsCard({
       document.removeEventListener('keydown', onKey, true)
       document.removeEventListener('mousedown', onPointer)
     }
-  }, [mode, onClose, creatingWorktree, openMenu])
+  }, [mode, onClose, creatingWorktree, openMenu, hasGlobalModal])
 
   const projectName = folderBase(snap.cwd)
   const hostLabel = snap.contextHost?.trim() || (snap.storageScope?.startsWith('ssh:') ? snap.storageScope.slice(4) : localHostLabel())
@@ -165,9 +186,22 @@ export function ThreadDetailsCard({
     if (name) void store.createWorktree(name)
   }
 
+  const isRemoteHost = Boolean(snap.storageScope?.startsWith('ssh:'))
+  const navigate = (panel: DesktopPanel, filePath?: string): void => {
+    setOpenMenu(null)
+    if (mode === 'popover') onClose()
+    onNavigate(panel, filePath)
+  }
+  const openTerminalFromCard = (): void => {
+    setOpenMenu(null)
+    if (mode === 'popover') onClose()
+    onOpenTerminal()
+  }
+
   const revealFolder = (): void => {
     setOpenMenu(null)
-    if (snap.cwd) void window.xerxes.fileAction?.('reveal', '.', snap.cwd)
+    if (mode === 'popover') onClose()
+    if (snap.cwd && !isRemoteHost) void window.xerxes.fileAction?.('reveal', '.', snap.cwd)
   }
 
   const isAntigravity = isAntigravityAcpSession(snap)
@@ -219,19 +253,21 @@ export function ThreadDetailsCard({
           </button>
           {openMenu === 'open' && (
             <div className="t3-dsubmenu" role="menu">
-              <button type="button" role="menuitem" onClick={() => { setOpenMenu(null); onNavigate('files') }}>
+              <button type="button" role="menuitem" onClick={() => navigate('files')}>
                 <T3Icon name="codeEditor" size={13} />
                 <span>Files &amp; Editor</span>
               </button>
-              <button type="button" role="menuitem" onClick={revealFolder}>
-                <T3Icon name="folder" size={13} />
-                <span>{revealInFolderLabel()}</span>
-              </button>
-              <button type="button" role="menuitem" onClick={() => { setOpenMenu(null); onOpenTerminal() }}>
+              {!isRemoteHost && (
+                <button type="button" role="menuitem" onClick={revealFolder}>
+                  <T3Icon name="folder" size={13} />
+                  <span>{revealInFolderLabel()}</span>
+                </button>
+              )}
+              <button type="button" role="menuitem" onClick={openTerminalFromCard}>
                 <T3Icon name="terminal" size={13} />
                 <span>Open Terminal</span>
               </button>
-              <button type="button" role="menuitem" onClick={() => { setOpenMenu(null); onNavigate('browser') }}>
+              <button type="button" role="menuitem" onClick={() => navigate('browser')}>
                 <T3Icon name="globe" size={13} />
                 <span>Open Browser</span>
               </button>
@@ -287,7 +323,7 @@ export function ThreadDetailsCard({
           type="button"
           className="t3-drow"
           title={branchName ? `Branch: ${branchName} · Open Source Control` : 'Open Source Control'}
-          onClick={() => onNavigate('review')}
+          onClick={() => navigate('review')}
         >
           <T3Icon name="gitBranch" size={14} className="t3-drow__ico" />
           <span className="t3-drow__label t3-drow__label--mono">{branchName || 'No branch'}</span>
@@ -314,8 +350,8 @@ export function ThreadDetailsCard({
                 disabled={!canSubmit}
                 onClick={() => {
                   setOpenMenu(null)
+                  if (mode === 'popover') onClose()
                   if (isAntigravity) {
-                    onClose()
                     prefillComposerPrompt(ANTIGRAVITY_COMMIT_AND_PUSH_PROMPT)
                     return
                   }
@@ -331,8 +367,8 @@ export function ThreadDetailsCard({
                 disabled={!canSubmit}
                 onClick={() => {
                   setOpenMenu(null)
+                  if (mode === 'popover') onClose()
                   if (isAntigravity) {
-                    onClose()
                     prefillComposerPrompt(ANTIGRAVITY_PULL_REQUEST_PROMPT)
                     return
                   }
@@ -342,7 +378,7 @@ export function ThreadDetailsCard({
                 <T3Icon name="gitPr" size={13} />
                 <span>Create PR</span>
               </button>
-              <button type="button" role="menuitem" onClick={() => { setOpenMenu(null); onNavigate('review') }}>
+              <button type="button" role="menuitem" onClick={() => navigate('review')}>
                 <T3Icon name="fileDiff" size={13} />
                 <span>Open Source Control</span>
               </button>
@@ -354,7 +390,7 @@ export function ThreadDetailsCard({
           type="button"
           className="t3-drow"
           title={changedCount > 0 ? `${changedCount} changed file${changedCount === 1 ? '' : 's'} · Open Diff` : 'Open Diff'}
-          onClick={() => onNavigate('review')}
+          onClick={() => navigate('review')}
         >
           <T3Icon name="fileDiff" size={14} className="t3-drow__ico" />
           <span className="t3-drow__label">Changes</span>
@@ -375,7 +411,7 @@ export function ThreadDetailsCard({
       {/* Section 3: Workspace Surfaces & Active Xerxes Orchestration */}
       <section className="t3-dsec">
         {(snap.swarm?.active || showsImmortalsForSession(snap)) && (
-          <button type="button" className="t3-drow" onClick={() => onNavigate('swarm')}>
+          <button type="button" className="t3-drow" onClick={() => navigate('swarm')}>
             <T3Icon name="network" size={14} className="t3-drow__ico" />
             <span className="t3-drow__label">Immortals</span>
             <span className="t3-drow__meta">
@@ -383,25 +419,25 @@ export function ThreadDetailsCard({
             </span>
           </button>
         )}
-        <button type="button" className="t3-drow" onClick={() => onNavigate('docs')}>
+        <button type="button" className="t3-drow" onClick={() => navigate('docs')}>
           <T3Icon name="layers" size={14} className="t3-drow__ico" />
           <span className="t3-drow__label">Artifacts</span>
           <span className="t3-drow__meta">Open</span>
         </button>
-        <button type="button" className="t3-drow" onClick={() => onNavigate('terminal')}>
+        <button type="button" className="t3-drow" onClick={() => navigate('terminal')}>
           <T3Icon name="terminalSquare" size={14} className="t3-drow__ico" />
           <span className="t3-drow__label">Terminal</span>
           <span className="t3-drow__meta">
             {runningTerminals > 0 ? `${runningTerminals} running` : 'Open'}
           </span>
         </button>
-        <button type="button" className="t3-drow" onClick={() => onNavigate('activity')}>
+        <button type="button" className="t3-drow" onClick={() => navigate('activity')}>
           <T3Icon name="activity" size={14} className="t3-drow__ico" />
           <span className="t3-drow__label">Activity</span>
           <span className="t3-drow__meta">{snap.turnActive ? 'Live' : 'Open'}</span>
         </button>
         {fleet.length > 0 && (
-          <button type="button" className="t3-drow" onClick={() => onNavigate('subagents')}>
+          <button type="button" className="t3-drow" onClick={() => navigate('subagents')}>
             <T3Icon name="bot" size={14} className="t3-drow__ico" />
             <span className="t3-drow__label">Subagents</span>
             <span className="t3-drow__meta">{workingAgents > 0 ? `${workingAgents} working` : `${fleet.length}`}</span>
@@ -413,7 +449,7 @@ export function ThreadDetailsCard({
             className={`t3-drow${snap.tab === 'plan' ? ' is-selected' : ''}`}
             aria-pressed={snap.tab === 'plan'}
             title={snap.tab === 'plan' ? 'Back to conversation' : 'Open Plan & to-dos'}
-            onClick={() => store.setTab(snap.tab === 'plan' ? 'activity' : 'plan')}
+            onClick={() => { if (mode === 'popover') onClose(); store.setTab(snap.tab === 'plan' ? 'activity' : 'plan') }}
           >
             <T3Icon name="checkCircle" size={14} className="t3-drow__ico" />
             <span className="t3-drow__label">Plan &amp; to-dos</span>
@@ -421,7 +457,7 @@ export function ThreadDetailsCard({
           </button>
         )}
         {goal && (
-          <button type="button" className="t3-drow" onClick={() => onNavigate('activity')} title={goal.objective}>
+          <button type="button" className="t3-drow" onClick={() => navigate('activity')} title={goal.objective}>
             <T3Icon name="sparkles" size={14} className="t3-drow__ico" />
             <span className="t3-drow__label">{goal.objective}</span>
             <span className="t3-drow__meta">{goal.phase}</span>

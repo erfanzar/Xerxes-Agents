@@ -271,6 +271,7 @@ export interface AcpRunPromptRequest {
   readonly permissionMode?: string
   readonly requestPermission?: (
     request: AcpClientPermissionRequest,
+    signal?: AbortSignal,
   ) => Promise<AcpClientPermissionResponse> | AcpClientPermissionResponse
   readonly resources?: readonly AcpPromptResourceInput[]
   readonly sessionId: string
@@ -534,10 +535,17 @@ type ActiveExternalSession = ActiveAcpSession | ActiveClaudeSession
  */
 export class DaemonAcpBridgeHost {
   private readonly active = new Map<string, ActiveExternalSession>()
+  private readonly connectGenerations = new Map<string, number>()
   private readonly lastAuthChallengeBySession = new Map<string, LastAcpAuthChallenge>()
   private readonly loginFlows = new Map<string, ActiveAcpLoginFlow>()
   private readonly bindingListeners = new Set<(sessionId: string, binding: AcpSessionBinding) => void>()
   private readonly sessionEventListeners = new Set<(sessionId: string, event: AcpBridgeStreamEvent) => void>()
+
+  private bumpConnectGeneration(sessionId: string): number {
+    const next = (this.connectGenerations.get(sessionId) ?? 0) + 1
+    this.connectGenerations.set(sessionId, next)
+    return next
+  }
   private readonly options: DaemonAcpBridgeHostOptions
   private defaultCreateElicitation: AcpDefaultCreateElicitationHandler | undefined
   private defaultRequestPermission: AcpDefaultRequestPermissionHandler | undefined
@@ -673,9 +681,11 @@ export class DaemonAcpBridgeHost {
       return { ok: false, error: 'agent_id is required.' }
     }
 
+    const connectGen = this.bumpConnectGeneration(sessionId)
+
     // Switching back to native Xerxes disconnects any active external subprocess.
     if (agentId === 'xerxes') {
-      await this.disconnect(sessionId)
+      await this.disconnect(sessionId, { keepGeneration: true })
       return {
         ok: true,
         binding: {
@@ -721,6 +731,7 @@ export class DaemonAcpBridgeHost {
               : 'acp')
       const displayName = discovered?.name ?? (agentId === 'custom' ? command : agentId)
       return this.connectStdioAcp({
+        connectGen,
         sessionId,
         agentId,
         name: displayName,
@@ -728,6 +739,7 @@ export class DaemonAcpBridgeHost {
         cwd,
         command: resolvedBinary ?? command,
         args,
+        ...(discovered?.env ? { env: discovered.env } : {}),
         ...(request.additionalDirectories?.length ? { additionalDirectories: request.additionalDirectories } : {}),
         ...(request.agent ? { agent: request.agent } : {}),
         ...(request.ideMcpPort !== undefined ? { ideMcpPort: request.ideMcpPort } : {}),
@@ -809,7 +821,10 @@ export class DaemonAcpBridgeHost {
           ...(resolvedDiscovered.installHint ? { install_hint: resolvedDiscovered.installHint } : {}),
         }
       }
-      await this.disconnect(sessionId)
+      await this.disconnect(sessionId, { keepGeneration: true })
+      if (this.connectGenerations.get(sessionId) !== connectGen) {
+        return { ok: false, error: 'Connection superseded by a newer request.' }
+      }
       const runnerOptions: ClaudeStreamJsonRunnerOptions = {
         binaryPath,
         cwd,
@@ -895,6 +910,7 @@ export class DaemonAcpBridgeHost {
       }
     }
     return this.connectStdioAcp({
+      connectGen,
       sessionId,
       agentId: resolvedDiscovered.id,
       name: resolvedDiscovered.name,
@@ -902,6 +918,7 @@ export class DaemonAcpBridgeHost {
       cwd,
       command,
       args: resolvedDiscovered.args ?? [],
+      ...(resolvedDiscovered.env ? { env: resolvedDiscovered.env } : {}),
       ...(request.additionalDirectories?.length ? { additionalDirectories: request.additionalDirectories } : {}),
       ...(request.agent ? { agent: request.agent } : {}),
       ...(request.ideMcpPort !== undefined ? { ideMcpPort: request.ideMcpPort } : {}),
@@ -913,7 +930,10 @@ export class DaemonAcpBridgeHost {
     })
   }
 
-  async disconnect(sessionId: string): Promise<boolean> {
+  async disconnect(sessionId: string, options?: { readonly keepGeneration?: boolean }): Promise<boolean> {
+    if (!options?.keepGeneration) {
+      this.bumpConnectGeneration(sessionId)
+    }
     this.lastAuthChallengeBySession.delete(sessionId)
     const existing = this.active.get(sessionId)
     if (!existing) {
@@ -1758,6 +1778,12 @@ export class DaemonAcpBridgeHost {
         error: `${existing.binding.name} (${existing.binding.transport}) does not support ACP session/fork.`,
       }
     }
+    if (existing.activeAbort) {
+      return {
+        ok: false,
+        error: 'Cannot fork an external ACP session while a turn is active.',
+      }
+    }
     const cwd = params.cwd ? resolve(params.cwd) : existing.binding.cwd
     try {
       const forked = await existing.client.forkSession({
@@ -1870,9 +1896,12 @@ export class DaemonAcpBridgeHost {
         const res = await steerRpc
         await acceptGate
         if (accepted) {
-          existing.activeTurnLastResult = {
-            stopReason: res.stopReason,
-            ...(res.usage ? { usage: res.usage } : {}),
+          const prev = existing.activeTurnLastResult
+          if (res.stopReason !== 'cancelled' || !prev || prev.stopReason === 'cancelled') {
+            existing.activeTurnLastResult = {
+              stopReason: res.stopReason,
+              ...(res.usage ? { usage: res.usage } : {}),
+            }
           }
           if (res.usage) {
             existing.activeTurnUsage?.(res.usage)
@@ -1883,7 +1912,7 @@ export class DaemonAcpBridgeHost {
         if (!accepted || combinedSignal.aborted) return
         if (isConcurrentPromptRejection(error) && request.onFallbackQueue) {
           await request.onFallbackQueue()
-        } else {
+        } else if (existing.liveSteerTasks.size <= 1) {
           existing.activeTurnError?.(errorMessage(error))
         }
       }
@@ -2106,6 +2135,16 @@ export class DaemonAcpBridgeHost {
     existing.activeAbort = turnAbort
     if (existing.kind === 'acp') {
       existing.cancelSuppressUntil = 0
+      if (!existing.outOfTurnInteractionAbort.signal.aborted) {
+        existing.outOfTurnInteractionAbort.abort(new Error('Superseded by explicit ACP turn'))
+      }
+      existing.outOfTurnInteractionAbort = new AbortController()
+      if (existing.binding.error && existing.binding.connected) {
+        const { error: _clearedError, ...restBinding } = existing.binding
+        void _clearedError
+        existing.binding = restBinding
+        this.notifyBindingChange(request.sessionId, existing.binding)
+      }
     }
     const combinedSignal = request.signal
       ? AbortSignal.any([request.signal, turnAbort.signal])
@@ -2140,6 +2179,8 @@ export class DaemonAcpBridgeHost {
         const elicitSignal = AbortSignal.any([combinedSignal, elicitAbort.signal])
         existing.activeElicitationAbort = elicitAbort
         existing.activePermissionHandler = request.requestPermission
+          ? permReq => request.requestPermission!(permReq, combinedSignal)
+          : undefined
         existing.activeElicitationHandler = request.createElicitation
           ? elicitReq => request.createElicitation!(elicitReq, elicitSignal)
           : undefined
@@ -2218,7 +2259,10 @@ export class DaemonAcpBridgeHost {
             await Promise.allSettled([...existing.liveSteerTasks])
           }
           const steerResult = readActiveTurnLastResult()
-          const finalStopReason = steerResult?.stopReason ?? result.stopReason
+          const finalStopReason =
+            steerResult && (steerResult.stopReason !== 'cancelled' || result.stopReason === 'cancelled')
+              ? steerResult.stopReason
+              : result.stopReason
           const finalUsage = steerResult?.usage ?? result.usage
           return {
             assistantText,
@@ -2231,8 +2275,9 @@ export class DaemonAcpBridgeHost {
           }
         } catch (error) {
           // If the initial prompt rejected only because a concurrent live steer took
-          // over, keep streaming and finish cleanly on the live-steer result.
-          if (!combinedSignal.aborted && existing.liveSteerTasks.size > 0) {
+          // over (even if the steer already settled before P1's rejection arrived),
+          // keep streaming and finish cleanly on the live-steer result.
+          if (!combinedSignal.aborted) {
             while (!combinedSignal.aborted && existing.liveSteerTasks.size > 0) {
               await Promise.allSettled([...existing.liveSteerTasks])
             }
@@ -2316,6 +2361,7 @@ export class DaemonAcpBridgeHost {
           }
         }
         const message = errorMessage(error)
+        request.onEvent({ type: 'error', message })
         return {
           assistantText,
           thinkingText,
@@ -2359,7 +2405,9 @@ export class DaemonAcpBridgeHost {
       readonly agentId: string
       readonly args: readonly string[]
       readonly command: string
+      readonly connectGen: number
       readonly cwd: string
+      readonly env?: Readonly<Record<string, string>>
       readonly ideMcpPort?: number
       readonly initialModeId?: string
       readonly installHint?: string
@@ -2371,13 +2419,18 @@ export class DaemonAcpBridgeHost {
       readonly sessionId: string
     },
   ): Promise<AcpConnectResult> {
-    await this.disconnect(params.sessionId)
+    await this.disconnect(params.sessionId, { keepGeneration: true })
+    if (this.connectGenerations.get(params.sessionId) !== params.connectGen) {
+      return { ok: false, error: 'Connection superseded by a newer request.' }
+    }
 
     let entryRef: ActiveAcpSession | undefined
+    let startupReady = false
     let initResult: AcpInitializeResult | undefined
     let initialAvailableCommands: readonly AcpAvailableCommand[] | undefined
     let initialUsageEvent: AcpClientEvent | undefined
     let initialSessionInfoEvent: AcpClientEvent | undefined
+    const initialLiveBindingEvents: AcpClientEvent[] = []
     const initialReplayEvents: AcpClientEvent[] = []
 
     const normalizedAdditionalDirs = normalizeAdditionalDirectories(params.cwd, params.additionalDirectories)
@@ -2401,7 +2454,9 @@ export class DaemonAcpBridgeHost {
             ? { ...transferredAgyEnv, ...this.options.env }
             : { ...process.env, ...transferredAgyEnv },
         )
-      : this.options.env
+      : params.env
+        ? { ...(this.options.env ?? process.env), ...params.env }
+        : this.options.env
 
     const readRepair = isAntigravity ? makeAntigravityReadRepair() : undefined
     const updateFocusStatus = isAntigravity ? makeAntigravityUpdateFocus() : undefined
@@ -2553,6 +2608,12 @@ export class DaemonAcpBridgeHost {
         } else if (acpEvent.type === 'session_info') {
           initialSessionInfoEvent = acpEvent
         } else if (
+          acpEvent.type === 'mode_update' ||
+          acpEvent.type === 'model_update' ||
+          acpEvent.type === 'config_update'
+        ) {
+          initialLiveBindingEvents.push(acpEvent)
+        } else if (
           acpEvent.type === 'user_message_chunk' ||
           acpEvent.type === 'text_delta' ||
           acpEvent.type === 'thought_delta' ||
@@ -2656,6 +2717,7 @@ export class DaemonAcpBridgeHost {
       }
 
       if (
+        startupReady &&
         !entryRef.activeAbort &&
         Date.now() >= entryRef.cancelSuppressUntil &&
         (acpEvent.type === 'usage_update' ||
@@ -2809,6 +2871,23 @@ export class DaemonAcpBridgeHost {
         ...(updateStepsPlans ? { updateStepsPlans } : {}),
       }
       entry.binding = projectAcpBindingWithHostTurbo(entry, rawBinding)
+      for (const liveEvent of initialLiveBindingEvents) {
+        if (
+          'sessionId' in liveEvent &&
+          liveEvent.sessionId &&
+          liveEvent.sessionId !== entry.externalSessionId
+        ) {
+          continue
+        }
+        const bridged = bridgeEventFromAcpClientEvent(liveEvent, entry.toolNamesById)
+        if (bridged) {
+          applyLiveBindingEvent(entry, bridged, this.options)
+        }
+      }
+      if (this.connectGenerations.get(params.sessionId) !== params.connectGen) {
+        await client.dispose().catch(() => undefined)
+        return { ok: false, error: 'Connection superseded by a newer request.' }
+      }
       entryRef = entry
       this.active.set(params.sessionId, entry)
       this.lastAuthChallengeBySession.delete(params.sessionId)
@@ -2890,6 +2969,11 @@ export class DaemonAcpBridgeHost {
           this.notifySessionEvent(params.sessionId, bridged)
         }
       }
+      if (this.connectGenerations.get(params.sessionId) !== params.connectGen || this.active.get(params.sessionId) !== entry) {
+        await client.dispose().catch(() => undefined)
+        return { ok: false, error: 'Connection superseded by a newer request.' }
+      }
+      startupReady = true
       return { ok: true, binding: entry.binding }
     } catch (error) {
       await client.dispose().catch(() => undefined)
@@ -3622,6 +3706,14 @@ function applyLiveBindingEvent(
       ...(event.modelName ? { current_model_name: event.modelName } : {}),
     })
   } else if (event.type === 'mode_update') {
+    if (entry.kind === 'acp' && entry.hostTurboActive) {
+      const incoming = event.modeId.trim().toLowerCase()
+      const underlying = (entry.hostTurboUnderlyingMode ?? '').trim().toLowerCase()
+      if (incoming && incoming !== ACP_TURBO_MODE_ID && incoming !== underlying) {
+        entry.hostTurboActive = false
+        entry.hostTurboUnderlyingMode = undefined
+      }
+    }
     next = mergeBindingModelAndModeState(next, {
       current_mode: event.modeId,
       ...(event.modeName ? { current_mode_name: event.modeName } : {}),
@@ -3635,8 +3727,29 @@ function applyLiveBindingEvent(
       if (entry.kind === 'acp' && extracted.modes && extracted.modes.length > 0) {
         entry.nativeModes = extracted.modes
       }
+      if (entry.kind === 'acp' && entry.hostTurboActive && extracted.current_mode) {
+        const incoming = extracted.current_mode.trim().toLowerCase()
+        const underlying = (entry.hostTurboUnderlyingMode ?? '').trim().toLowerCase()
+        if (incoming && incoming !== ACP_TURBO_MODE_ID && incoming !== underlying) {
+          entry.hostTurboActive = false
+          entry.hostTurboUnderlyingMode = undefined
+        }
+      }
       next = mergeBindingModelAndModeState(next, extracted)
     } else if (event.configId && event.value !== undefined) {
+      if (
+        entry.kind === 'acp' &&
+        entry.hostTurboActive &&
+        typeof event.value === 'string' &&
+        isModeConfigOptionId(next, event.configId)
+      ) {
+        const incoming = event.value.trim().toLowerCase()
+        const underlying = (entry.hostTurboUnderlyingMode ?? '').trim().toLowerCase()
+        if (incoming && incoming !== ACP_TURBO_MODE_ID && incoming !== underlying) {
+          entry.hostTurboActive = false
+          entry.hostTurboUnderlyingMode = undefined
+        }
+      }
       next = applySingleConfigOptionPatch(next, event.configId, event.value)
     }
   } else if (event.type === 'available_commands') {

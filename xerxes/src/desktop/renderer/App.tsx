@@ -704,7 +704,7 @@ export function Shell({ snap }: { snap: Snapshot }): ReactElement {
           {snap.interactionHidden
             ? <button className="badge badge--need" title="Show the request waiting for you" onClick={() => store.showInteraction()}>needs input{snap.turnActive ? ' · acting paused' : ''}</button>
             : snap.approval
-            ? <ApprovalCard approval={snap.approval} policy={snap.permissionMode} />
+            ? <ApprovalCard key={`dock:${snap.approval.id}`} approval={snap.approval} policy={snap.permissionMode} />
             : snap.question ? <QuestionCard key={`dock:${snap.question.requestId}`} question={snap.question} plan={snap.plan} /> : null}
         </div>
       )}
@@ -1434,7 +1434,12 @@ export function Sidebar({ snap, page }: { snap: Snapshot; page: DesktopPageName 
   const inbox = chrome.inbox ?? fallbackInbox
 
   if (vibes) {
-    const activeProvider = isExternalAcpBinding(snap.acpBinding) ? snap.acpBinding.provider : 'xerxes' as const
+    const activeExternal = isExternalAcpBinding(snap.acpBinding)
+      ? snap.acpBinding
+      : snap.savedAcpBinding && snap.savedAcpBinding.transport !== 'native'
+        ? snap.savedAcpBinding
+        : null
+    const activeProvider = activeExternal ? activeExternal.provider : 'xerxes' as const
     const t3Rows: T3SidebarRow[] = [
       ...rows.map(row => ({
         id: row.id,
@@ -2040,6 +2045,7 @@ function Chat({ snap, page, agent = '', openAgent = () => {} }: { snap: Snapshot
       </div>
       {vibes && !onPage && !agent && chrome.terminalDrawerOpen && (
         <TerminalDrawer
+          key={`${snap.cwd}:${snap.sessionKey}`}
           snap={snap}
           height={chrome.terminalDrawerHeight ?? 280}
           onResize={height => chrome.setTerminalDrawerHeight?.(height)}
@@ -2143,7 +2149,7 @@ const StreamGroupRow = memo(function StreamGroupRow({
       {disclosed
         ? <ActivityGroup blocks={group} active={active} turnActive={turnActive} />
         : group.map(block => <BlockView key={block.id} block={block} />)}
-      {inlineApproval && approval && <ApprovalCard approval={approval} policy={permissionMode} inline />}
+      {inlineApproval && approval && <ApprovalCard key={approval.id} approval={approval} policy={permissionMode} inline />}
       <FilesChangedCard group={group} changes={changes} {...(cwd ? { cwd } : {})} />
     </div>
   )
@@ -2328,7 +2334,7 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
           {failedCard}
         </div>
       )}
-      {floatApproval && <div className="stream__col"><ApprovalCard approval={approval} policy={snap.permissionMode} /></div>}
+      {floatApproval && <div className="stream__col"><ApprovalCard key={approval.id} approval={approval} policy={snap.permissionMode} /></div>}
       {question && (
         <div className="stream__col">
           <QuestionCard key={`${snap.currentId}:${question.requestId}`} question={question} plan={snap.plan} />
@@ -2925,6 +2931,7 @@ export function PlanApprovalCard({ approval, planId }: { approval: NonNullable<S
   return (
     <div ref={card} tabIndex={-1} className="plancard" role="alertdialog" aria-modal="false" aria-label="Plan ready"
       onKeyDown={event => {
+        if (event.defaultPrevented) return
         if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); submit(); return }
         if (event.target instanceof HTMLTextAreaElement) return
         const index = ['1', '2', '3'].indexOf(event.key)
@@ -2958,7 +2965,10 @@ export function PlanApprovalCard({ approval, planId }: { approval: NonNullable<S
       </div>
       {choice === 'keep' && <textarea className="plancard__note" aria-label="Refine the plan" placeholder="Tell the agent what to change, add or drop" rows={2} value={note} autoFocus
         onChange={event => setNote(event.target.value)}
-        onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); submit() } }} />}
+        onKeyDown={event => {
+          if (event.nativeEvent.isComposing) return
+          if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.stopPropagation(); submit() }
+        }} />}
       <div className="plancard__actions">
         <button type="button" className="plancard__submit" disabled={!canSubmit} onClick={submit}>{choice === 'keep' ? 'Send feedback' : 'Continue with the plan'} <kbd>⌘</kbd><kbd>↵</kbd></button>
       </div>
@@ -3123,11 +3133,10 @@ export function FailedCard({ failed }: { failed: NonNullable<Snapshot['failed']>
           ? <button className="btn" disabled={compacting} onClick={async () => { setCompacting(true); try { await store.retryCompaction() } finally { setCompacting(false) } }}>{compacting ? 'Compacting…' : 'Retry compaction'}</button>
           : <button
               className="btn"
-              disabled={!failed.lastUser}
               // Still offered when futile — the limit may have reset, and
               // hiding it would strand a user who knows it has — but never
               // as the obvious next thing to click.
-              title={view.retryIsFutile ? 'This will fail again until the cause above is resolved' : failed.lastUser ? 'Continue from where the turn stopped' : undefined}
+              title={view.retryIsFutile ? 'This will fail again until the cause above is resolved' : 'Continue from where the turn stopped'}
               onClick={() => store.retryFailed()}
             >
               <Icon name="retry" size={13} /> Retry
@@ -3309,13 +3318,22 @@ export function QuestionCard({
       submit()
     }
   }
+  useEffect(() => {
+    if (review || isUrlMode) return
+    const previous = document.activeElement
+    cardRef.current?.focus()
+    return () => { if (previous instanceof HTMLElement && previous.isConnected) previous.focus() }
+  }, [question.requestId, review, isUrlMode])
   // Number keys choose options while the card is up (not while typing); the
   // hints are only honest for the FIRST question — later ones have no keys.
   useEffect(() => {
     if (review || isUrlMode) return // PlanReviewCard & UrlConsentCard own their responses.
     const onKey = (event: KeyboardEvent): void => {
+      if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return
+      if (typeof document !== 'undefined' && document.querySelector('[role="dialog"][aria-modal="true"]')) return
       const target = event.target as HTMLElement | null
-      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'BUTTON' || target.isContentEditable)) return
+      const insideCard = Boolean(target && cardRef.current?.contains(target))
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable || (target.tagName === 'BUTTON' && !insideCard))) return
       const number = Number.parseInt(event.key, 10)
       if (!Number.isFinite(number) || number < 1) return
       const item = question.items[0]
@@ -3331,6 +3349,7 @@ export function QuestionCard({
     }
     const onEnter = (event: KeyboardEvent): void => {
       if (event.defaultPrevented || event.key !== 'Enter') return
+      if (typeof document !== 'undefined' && document.querySelector('[role="dialog"][aria-modal="true"]')) return
       const target = event.target as HTMLElement | null
       const modEnter = event.metaKey || event.ctrlKey
       const insideCard = Boolean(target && cardRef.current?.contains(target))
@@ -3368,7 +3387,7 @@ export function QuestionCard({
     const skippable = question.items.every(item => item.allowFreeform)
     const skip = (): void => store.answerQuestion(question.requestId, Object.fromEntries(question.items.map(item => [item.id, 'Skipped'])))
     return (
-      <div ref={cardRef} className="vq" role="form" aria-label="Agent questions" onKeyDown={handleCardKeyDown}>
+      <div ref={cardRef} tabIndex={-1} className="vq" role="form" aria-label="Agent questions" onKeyDown={handleCardKeyDown}>
         <span className="vq__pill"><span className="vq__ring" aria-hidden="true" />Needs your input</span>
         <div className="vq__card">
           {question.items.map((item, qi) => {
@@ -3438,7 +3457,7 @@ export function QuestionCard({
                           setOthers(prev => ({ ...prev, [item.id]: value }))
                           if (!multi) setSelections(prev => ({ ...prev, [item.id]: [] }))
                         }}
-                        onKeyDown={e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey || !e.shiftKey)) { e.preventDefault(); e.stopPropagation(); submit() } }}
+                        onKeyDown={e => { if (!e.nativeEvent.isComposing && e.key === 'Enter' && (e.metaKey || e.ctrlKey || !e.shiftKey)) { e.preventDefault(); e.stopPropagation(); submit() } }}
                       />
                     </div>
                   )}
@@ -3455,7 +3474,7 @@ export function QuestionCard({
     )
   }
   return (
-    <div ref={cardRef} className="qcard" role="form" aria-label="Agent questions" onKeyDown={handleCardKeyDown}>
+    <div ref={cardRef} tabIndex={-1} className="qcard" role="form" aria-label="Agent questions" onKeyDown={handleCardKeyDown}>
       <div className="qcard__head">
         <span className="approval__dot" aria-hidden="true" />
         <span className="qcard__title">{question.items.length === 1 ? 'The agent has a question' : `The agent has ${question.items.length} questions`}</span>
@@ -3510,6 +3529,7 @@ export function QuestionCard({
                     setOthers(prev => ({ ...prev, [item.id]: e.target.value }))
                     if (!multi) setSelections(prev => ({ ...prev, [item.id]: [] }))
                   }}
+                  onKeyDown={e => { if (!e.nativeEvent.isComposing && e.key === 'Enter' && (e.metaKey || e.ctrlKey || !e.shiftKey)) { e.preventDefault(); e.stopPropagation(); submit() } }}
                 />
               </div>
             )}
@@ -3545,19 +3565,22 @@ function PlanReviewCard({
   feedbackRef.current = feedback
   pickedRef.current = picked
   const item = question.items[0]
-  if (!item) return <></>
   // No `?? options[0]` fallback: it promoted whatever came first — possibly
   // "Cancel" — to the solid primary button bound to `1`. When nothing reads
   // like approval, every option is just an option.
-  const approveOption = item.options.find(option => /approve|accept|start|proceed|go ahead|yes/i.test(option)) ?? ''
-  const otherOptions = item.options.filter(option => option !== approveOption)
+  const approveOption = item?.options.find(option => /approve|accept|start|proceed|go ahead|yes/i.test(option)) ?? ''
+  const otherOptions = item ? item.options.filter(option => option !== approveOption) : []
   /** `1` belongs to the approve action only when there is one. */
   const firstOtherKey = approveOption ? 2 : 1
-  const answer = (value: string): void => store.answerQuestion(question.requestId, { [item.id]: value })
+  const answer = (value: string): void => {
+    if (!item) return
+    store.answerQuestion(question.requestId, { [item.id]: value })
+  }
   const readyToSend = feedback.trim() || picked
   readyToSendRef.current = Boolean(readyToSend)
 
   useEffect(() => {
+    if (!item) return
     const onKey = (event: KeyboardEvent): void => {
       const target = event.target as HTMLElement | null
       if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return
@@ -3578,7 +3601,9 @@ function PlanReviewCard({
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [question, approveOption, otherOptions, firstOtherKey])
+  }, [item, question, approveOption, otherOptions, firstOtherKey])
+
+  if (!item) return <></>
 
   return (
     <div className="qcard qcard--plan" role="form" aria-label="Plan review">
@@ -3770,16 +3795,14 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
     return () => { observer.disconnect(); window.removeEventListener('resize', grow) }
   }, [])
   const send = async (mode: 'default' | 'steer' = 'default'): Promise<void> => {
-    if (wantsHints(draft)) {
-      const seq = hintSeq.current
-      const items = hints?.items ?? await store.completeText(draft).catch(() => [])
-      if (seq !== hintSeq.current) return
-      const item = items[hints?.index ?? 0]
-      if (item) pickHint(item)
-      else setHints({items: [], index: 0})
-      return
+    if (hints && hints.items.length > 0 && wantsHints(draft)) {
+      const item = hints.items[hints.index]
+      if (item) {
+        pickHint(item)
+        return
+      }
     }
-    if ((!draft.trim() && !images.length) || snap.connection !== 'online' || store.getSnapshot().submissionPending || sendingDraft.current) return
+    if ((!draft.trim() && !images.length) || snap.connection !== 'online' || Boolean(snap.compacting) || store.getSnapshot().submissionPending || sendingDraft.current) return
     open(null)
     const origin = latestDraft.current.identity
     const sent = draft
@@ -3839,6 +3862,7 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
   }, [hints?.index, hints?.items.length])
 
   const externalAcp = isExternalAcpBinding(snap.acpBinding)
+  const hasExternalAcpSession = externalAcp || Boolean(snap.savedAcpBinding && snap.savedAcpBinding.transport !== 'native')
   const acpSupportsImages = !externalAcp || snap.acpBinding?.capabilities?.prompt.image !== false
   const hasAcpPlanMode = externalAcp && Boolean(snap.acpBinding?.modes?.some(mode => /^(plan|planning)$/i.test(mode.id)))
   const inPlanMode = externalAcp
@@ -4024,7 +4048,7 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
               Steer now
             </button>
           )}
-          {!externalAcp && snap.providerRelay && <RelayBadge relay={snap.providerRelay} />}
+          {!hasExternalAcpSession && snap.providerRelay && <RelayBadge relay={snap.providerRelay} />}
           <T3ModelPicker snap={snap} />
           <Dictation compact sessionKey={snap.sessionKey} onText={text => { setDraft(value => (value ? value + ' ' : '') + text) }} />
         </div>
@@ -4092,7 +4116,7 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
             onClick={() => open('btw')}
           >{!vibes && <Icon name="chat" size={14} />}Ask aside</button>
           <span className="composer__flex" />
-          {!externalAcp && snap.providerRelay && <RelayBadge relay={snap.providerRelay} />}
+          {!hasExternalAcpSession && snap.providerRelay && <RelayBadge relay={snap.providerRelay} />}
           <AcpRuntimePicker snap={snap} compact={vscode} />
           {externalAcp ? (
             <>
@@ -4171,11 +4195,14 @@ function RepoBar({ snap }: { snap: Snapshot }): ReactElement | null {
   const [hidden, setHidden] = useState(() => hiddenRepoBars.has(snap.cwd))
   const [creatingWorktree, setCreatingWorktree] = useState(false)
   const [worktreeName, setWorktreeName] = useState('')
-  useEffect(() => { setHidden(hiddenRepoBars.has(snap.cwd)); setRepo(null); setCreatingWorktree(false) }, [snap.cwd])
+  const reqRef = useRef(0)
+  useEffect(() => { reqRef.current += 1; setHidden(hiddenRepoBars.has(snap.cwd)); setRepo(null); setCreatingWorktree(false) }, [snap.cwd])
   const refresh = useCallback(async () => {
     if (!snap.cwd || snap.connection !== 'online') return
+    const req = ++reqRef.current
     try {
       const result = await desktopCall(window.xerxes, snap.sessionKey, 'git.status', {})
+      if (req !== reqRef.current) return
       const status = result.repository as ScmStatus | null | undefined
       if (status !== undefined) store.syncBranch(status?.branch ?? '')
       setRepo(status ? {
@@ -4185,7 +4212,7 @@ function RepoBar({ snap }: { snap: Snapshot }): ReactElement | null {
       } : null)
     } catch {
       // A runtime without git.status: the line shows the folder alone.
-      setRepo(null)
+      if (req === reqRef.current) setRepo(null)
     }
   }, [snap.cwd, snap.sessionKey, snap.connection])
   // After each turn and each file the agent changes; on focus for outside edits.
@@ -4452,7 +4479,7 @@ export function FilesChangedCard({
   const [expandedDirs, setExpandedDirs] = useState<ReadonlySet<string>>(() => new Set())
   const checkpoint = group.find(block => block.kind === 'checkpoint')
   if (!checkpoint || checkpoint.kind !== 'checkpoint') return null
-  const files = changes.filter(file => file.turn === checkpoint.turn)
+  const files = changes.filter(file => file.turn === checkpoint.turn || (file.turns?.includes(checkpoint.turn) ?? false))
   if (!files.length) return null
   const adds = files.reduce((sum, file) => sum + file.adds, 0)
   const dels = files.reduce((sum, file) => sum + file.dels, 0)
@@ -4683,8 +4710,10 @@ export function ActivityDetails({ snap, selectedAgent = '' }: { snap: Snapshot; 
   // The agent open in the conversation's place: its details live here, not in its chat.
   const openAgent = selectedAgent ? fleet.find(row => row.id === selectedAgent || row.agentDetails?.requestKey === selectedAgent) : undefined
   const externalBinding = isExternalAcpBinding(snap.acpBinding) ? snap.acpBinding : null
-  const railSnap = externalBinding
-    ? { ...snap, model: activeAcpModelLabel(externalBinding) }
+  const displayExternalBinding =
+    externalBinding ?? (snap.savedAcpBinding && snap.savedAcpBinding.transport !== 'native' ? snap.savedAcpBinding : null)
+  const railSnap = displayExternalBinding
+    ? { ...snap, model: activeAcpModelLabel(displayExternalBinding) }
     : snap
   const acpCatalog = externalBinding ? resolveExternalAcpCatalog(externalBinding) : null
   const acpCaps = externalBinding?.capabilities

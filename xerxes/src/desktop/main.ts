@@ -714,7 +714,7 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     view,
     lastActiveAt: Date.now(),
     hasActiveTurn: false,
-    isBusy: () => Boolean(remoteAttempt || voiceRequest),
+    isBusy: () => Boolean(remoteAttempt || voiceRequest || providerForwarding?.hasActiveGrants()),
     onHostHidden: hidden => {
       browserTab?.setHostHidden(hidden)
     },
@@ -725,12 +725,32 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
   workspaceSurfaces.set(id, surfaceRecord)
   surfaceSessions.set(id, session)
   activateSurface(id)
+  let offlineTurnClearTimer: ReturnType<typeof setTimeout> | undefined
   const attach = (next?: DaemonRpc) => {
+    clearTimeout(offlineTurnClearTimer)
     surfaceRecord.hasActiveTurn = false
-    next?.onConnection(online => { if (!online) surfaceRecord.hasActiveTurn = false })
+    next?.onConnection(online => {
+      clearTimeout(offlineTurnClearTimer)
+      if (!online) {
+        // Keep active-turn eviction protection across brief SSH reconnect drops.
+        offlineTurnClearTimer = setTimeout(() => { surfaceRecord.hasActiveTurn = false }, REATTACH_GRACE_MS)
+        offlineTurnClearTimer.unref?.()
+      }
+    })
     registerDaemonBridge(contents, next, (type, payload) => {
-      if (type === 'turn_begin') surfaceRecord.hasActiveTurn = true
-      else if (type === 'turn_end') surfaceRecord.hasActiveTurn = false
+      const eventSessionId = typeof payload.session_id === 'string' ? payload.session_id : ''
+      const matchesCurrent = !eventSessionId || !session.current || eventSessionId === session.current
+      if (matchesCurrent && type === 'turn_begin') surfaceRecord.hasActiveTurn = true
+      else if (matchesCurrent && type === 'turn_end') surfaceRecord.hasActiveTurn = false
+      if (
+        type === 'acp_status'
+        && providerForwarding
+        && matchesCurrent
+        && ((payload.connected === true && payload.transport !== 'native')
+          || (typeof payload.agent_id === 'string' && payload.agent_id !== '' && payload.agent_id !== 'xerxes'))
+      ) {
+        if (session.current) void providerForwarding.revoke(session.current).catch(() => undefined)
+      }
       // Some session-bound events omit the id. Capture the owning task now,
       // before a later session.open changes what this surface shows.
       const current = session.current
@@ -817,7 +837,7 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     daemon = next
     attach(next)
     previous?.dispose()
-    if (!window.isDestroyed()) contents.reload()
+    if (!window.isDestroyed() && !contents.isDestroyed()) contents.reload()
   }
 
 
@@ -901,7 +921,7 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     // SSH hosts even when no local view is materialized.
     let localSaved: WorkspaceContext[] = []
     if (currentScope !== 'local') {
-      const openLocal = openContexts.filter(ctx => !ctx.remote)
+      const openLocal = openContexts.filter(ctx => !ctx.remote && Boolean(ctx.workspace))
       if (openLocal.length > 0) {
         const coveredFolders = new Set<string>()
         for (const ctx of openLocal) {
@@ -1055,11 +1075,12 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
       rpc.onConnection(online => {
         clearTimeout(dropped)
         if (!online) dropped = setTimeout(() => { void forwarding.disconnect() }, REATTACH_GRACE_MS)
-        else void followLocalProviders(forwarding)
       })
       // The window shows when this conversation's prompts run on this computer.
       forwarding.onChange(() => { if (!contents.isDestroyed()) contents.send('desktop:provider-relay') })
       localProviders.onConnection(online => { if (!online) void forwarding.disconnect() })
+      const onCancelConnect = () => { rpc.dispose() }
+      controller.signal.addEventListener('abort', onCancelConnect, { once: true })
       try {
         await rpc.call('runtime.status')
         controller.signal.throwIfAborted()
@@ -1069,6 +1090,8 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
         rpc.dispose()
         await next.close()
         throw error
+      } finally {
+        controller.signal.removeEventListener('abort', onCancelConnect)
       }
       session.bind(
         (remoteMachine ?? saved?.remote)?.target === machine.target &&
@@ -1099,7 +1122,7 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
       scheduleWindowSave()
       if (activeSurfaces.get(window.id) === id) window.setTitle(`${machine.alias} · ${basename(next.projectDir)} — ${APP_NAME}`)
       await previous?.close()
-      if (!window.isDestroyed()) contents.reload()
+      if (!window.isDestroyed() && !contents.isDestroyed()) contents.reload()
       return { ok: true }
     } catch (error) {
       remoteError = error instanceof Error ? error.message : String(error)
@@ -1216,6 +1239,9 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
       } else if (action === 'save') {
         const m = remoteTarget(params.machine)
         command = 'add ' + [m.alias, m.target, m.workspacePath].map(argument).join(' ')
+        const result = await desktopMachineCommand(join(xerxesHome(), 'machines.json'), command)
+        savedHostContexts.invalidate()
+        return result
       } else if (action === 'remove') {
         command = 'remove ' + argument(params.alias)
         const result = await desktopMachineCommand(join(xerxesHome(), 'machines.json'), command)
@@ -1375,16 +1401,26 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     }
     const picked = typeof directory === 'string' ? directory : await pickWorkspace()
     if (!picked || window.isDestroyed()) return null
-    if (remoteMachine && picked === selectedWorkspace && typeof sessionId === 'string' && fresh !== true) {
-      // Opening a task of this SSH workspace while another one runs: bring
-      // forward a view that already shows it. Building a new view each time
-      // meant a new SSH connection and a full reload on every click, and the
-      // views piled up on the running task.
+    if (remoteMachine && typeof sessionId === 'string' && fresh !== true) {
+      // Opening a task of this SSH host while another one runs: bring forward a
+      // view that already shows it, or open a remote view on that host's folder
+      // (never falling through to a local workspace view).
       openRemoteView(window, { ...remoteMachine, workspacePath: picked }, sessionId)
-    } else if (remoteMachine && picked === selectedWorkspace) {
+    } else if (remoteMachine) {
       const savedWindow = windowStates.get(id)?.()
       if (!savedWindow) throw new Error('Remote workspace is not ready')
-      createWorkspaceWindow(null, { ...savedWindow, sessionId: typeof sessionId === 'string' ? sessionId : null }, undefined, window, fresh === true, preset)
+      createWorkspaceWindow(
+        null,
+        {
+          ...savedWindow,
+          remote: { ...remoteMachine, workspacePath: picked },
+          sessionId: typeof sessionId === 'string' ? sessionId : null,
+        },
+        undefined,
+        window,
+        fresh === true,
+        preset,
+      )
     } else if (sessionId) openWorkspaceView(window, picked, sessionId as string)
     // A fresh task opens as another view in THIS window (like opening a
     // second chat mid-turn does), never as a new OS window; the running task
@@ -1428,6 +1464,7 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     windowStates.delete(id)
     if (!quitting) scheduleWindowSave()
     windowRoutes.remove(id)
+    clearTimeout(offlineTurnClearTimer)
     detachDaemon(id)
     closeProviderForwarding()
     browserTab?.close()
@@ -1470,14 +1507,29 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
       finally { pendingSessions = undefined }
       })()
     }
+    if (cachedSessions.length === 0 && pendingSessions) {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      await Promise.race([
+        pendingSessions,
+        new Promise<void>(resolve => {
+          timer = setTimeout(resolve, 1500)
+          timer.unref?.()
+        }),
+      ]).finally(() => { if (timer !== undefined) clearTimeout(timer) })
+    }
     const machine = remoteMachine ?? saved?.remote
     if (!machine) return { id, label: 'This Mac', workspace: selectedWorkspace ?? '', remote: false, sessions: cachedSessions }
     // The host's daemon lists every project on it; keep this folder's tasks
     // when another folder of the same host is saved or open.
     const folders = savedHostContexts.folders(machine.target, openContextRemotes())
+    const scopedSessions = sessionsFor(cachedSessions, machine.workspacePath, folders)
+    const displaySessions = daemon?.online
+      ? scopedSessions
+      : scopedSessions.map(row => (row.status === 'working' ? { ...row, status: 'idle' as const } : row))
     return { id, label: contextLabel(machine.alias, machine.workspacePath),
       workspace: selectedWorkspace ?? machine.workspacePath, workspacePath: machine.workspacePath, alias: machine.alias, remote: true,
-      sessions: sessionsFor(cachedSessions, machine.workspacePath, folders) }
+      ...(daemon?.online ? {} : { availability: 'offline' as const }),
+      sessions: displaySessions }
   })
   if (!view) {
     // Attach host-level layout & visibility listeners once per BrowserWindow, not once per child view.

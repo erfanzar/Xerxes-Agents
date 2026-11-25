@@ -161,8 +161,9 @@ export function T3ModelPicker({
   const searchRef = useRef<HTMLInputElement>(null)
 
   const externalBinding = isExternalAcpBinding(snap.acpBinding) ? snap.acpBinding : null
-  const activeRuntimeId = externalBinding ? externalBinding.agent_id : 'xerxes'
-  const activeProvider: AgentBrandProvider = externalBinding ? externalBinding.provider : 'xerxes'
+  const displayExternal = externalBinding ?? (snap.savedAcpBinding && snap.savedAcpBinding.transport !== 'native' ? snap.savedAcpBinding : null)
+  const activeRuntimeId = displayExternal ? displayExternal.agent_id : 'xerxes'
+  const activeProvider: AgentBrandProvider = displayExternal ? displayExternal.provider : 'xerxes'
   const agents = useMemo(() => resolveRuntimeList(snap.acpAgents), [snap.acpAgents])
   const online = snap.connection === 'online'
   const connecting = Boolean(snap.acpConnecting)
@@ -183,16 +184,22 @@ export function T3ModelPicker({
     const isStoreOpen = Boolean(snap.pickerOpen)
     prevPickerOpenRef.current = isStoreOpen
     if (isStoreOpen && !wasOpen) {
-      setSelectedRail(activeRuntimeId)
+      const live = store.getSnapshot()
+      const liveExt = isExternalAcpBinding(live.acpBinding)
+        ? live.acpBinding
+        : live.savedAcpBinding && live.savedAcpBinding.transport !== 'native'
+          ? live.savedAcpBinding
+          : null
+      setSelectedRail(liveExt ? liveExt.agent_id : 'xerxes')
       setSearch('')
       setPermissionsExpanded(false)
       setCustomOpen(false)
       setOpen(true)
-      if (online) {
+      if (live.connection === 'online') {
         void store.refreshAcpAgents({ silent: true })
-        if (!externalBinding) {
-          if (snap.models.length === 0) void store.loadModels()
-          store.loadReasoningLevels({ silent: snap.reasoningLevels.length > 0 })
+        if (!liveExt) {
+          if (live.models.length === 0) void store.loadModels()
+          store.loadReasoningLevels({ silent: live.reasoningLevels.length > 0 })
         }
       }
     } else if (!isStoreOpen && wasOpen) {
@@ -434,11 +441,11 @@ export function T3ModelPicker({
   }
 
   // Trigger display strings (Image 2 bottom-right: `[Icon] 4 Neon  Extra`)
-  const matchedNativeModel = !externalBinding && snap.model
+  const matchedNativeModel = !displayExternal && snap.model
     ? snap.models.find(m => m.id === snap.model)
     : undefined
-  const fullModelLabel = externalBinding
-    ? activeAcpModelLabel(externalBinding)
+  const fullModelLabel = displayExternal
+    ? activeAcpModelLabel(displayExternal)
     : matchedNativeModel?.label?.trim()
       ? matchedNativeModel.label.trim()
       : snap.model
@@ -446,8 +453,8 @@ export function T3ModelPicker({
         : 'Choose model'
   const shortModelLabel = compactModelTriggerName(fullModelLabel)
   const activeNativeEffort = snap.reasoningEffort || snap.reasoningDefault
-  const activeThoughtLabel = externalBinding
-    ? activeAcpThoughtLevelLabel(externalBinding)
+  const activeThoughtLabel = displayExternal
+    ? activeAcpThoughtLevelLabel(displayExternal)
     : snap.reasoningLevels.length > 0 && activeNativeEffort
       ? reasoningLevelLabel(activeNativeEffort)
       : null
@@ -954,8 +961,8 @@ export function T3ModelPicker({
                   </div>
                 )}
 
-                {/* Expanded Permission / Mode Strip */}
-                {permissionsExpanded && (
+                {/* Expanded Permission / Mode Strip (only when native Xerxes or external ACP advertises modes) */}
+                {permissionsExpanded && (!externalBinding || acpModes.length > 0) && (
                   <div className="t3-mpop__perms" role="radiogroup" aria-label="Permissions">
                     {externalBinding && acpModes.length > 0
                       ? acpModes.map(mode => {
@@ -1000,16 +1007,23 @@ export function T3ModelPicker({
 
                 {/* Bottom Footer Bar: Centered Permissions / Access Mode Trigger (Image 4) */}
                 <div className="t3-mpop__foot">
-                  <button
-                    type="button"
-                    className={`t3-mpop__foot-btn${permissionsExpanded ? ' is-open' : ''}`}
-                    aria-expanded={permissionsExpanded}
-                    onClick={() => setPermissionsExpanded(value => !value)}
-                  >
-                    <T3Icon name="shieldCheck" size={13} />
-                    <span>{footerLabel}</span>
-                    <T3Icon name={permissionsExpanded ? 'chevronDown' : 'chevronUp'} size={12} />
-                  </button>
+                  {externalBinding && acpModes.length === 0 ? (
+                    <span className="t3-mpop__foot-btn" aria-label={`Runtime: ${footerLabel}`}>
+                      <T3Icon name="shieldCheck" size={13} />
+                      <span>{footerLabel}</span>
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      className={`t3-mpop__foot-btn${permissionsExpanded ? ' is-open' : ''}`}
+                      aria-expanded={permissionsExpanded}
+                      onClick={() => setPermissionsExpanded(value => !value)}
+                    >
+                      <T3Icon name="shieldCheck" size={13} />
+                      <span>{footerLabel}</span>
+                      <T3Icon name={permissionsExpanded ? 'chevronDown' : 'chevronUp'} size={12} />
+                    </button>
+                  )}
                 </div>
               </div>
             </div>

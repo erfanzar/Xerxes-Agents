@@ -247,8 +247,10 @@ export async function openRemote(
       await delay(25, undefined, { signal })
     }
     let reconnectAddress = address
+    const { confirmHostKey: _skipReconnectHostKey, ...reconnectPorts } = ports
+    void _skipReconnectHostKey
     const connection: RemoteConnection = { socketPath, projectDir: address.projectDir, expectedBuildId: address.expectedBuildId, close,
-      reconnect: (retrySignal, retryFailure) => openRemote(machine, retrySignal, retryFailure, reconnectAddress, ports),
+      reconnect: (retrySignal, retryFailure) => openRemote(machine, retrySignal, retryFailure, reconnectAddress, { ...reconnectPorts, providerSetup: false }),
       async update(force = false) {
         const updated = remoteAddress(await run('ssh', [...ssh, '-T', '--', destination,
           'exec sh -c ' + quote(remoteBootstrapScript(machine.workspacePath, 'daemon', { force, version: XERXES_VERSION }))], updateController.signal, 300000))

@@ -21,6 +21,8 @@ import { ProjectMonogram } from './ProjectMonogram.js'
 import { T3Icon } from './T3Icons.js'
 import { copyToClipboard } from './CopyButton.js'
 import { LearnedBadge } from './LearnedPanel.js'
+import { ElapsedClock } from './ElapsedClock.js'
+import { elapsedOf } from './duration.js'
 import { isExternalAcpBinding } from './AcpRuntimePicker.js'
 import { RuntimeBrandIcon } from './T3ModelPicker.js'
 import type { AgentBrandProvider } from './XerxesSprites.js'
@@ -252,8 +254,13 @@ export function T3Sidebar({
   const snoozeRef = useRef<HTMLDivElement>(null)
   const folderMenuRef = useRef<HTMLDivElement>(null)
 
-  const activeProvider: AgentBrandProvider = isExternalAcpBinding(snap.acpBinding)
-    ? snap.acpBinding.provider
+  const activeExternalBinding = isExternalAcpBinding(snap.acpBinding)
+    ? snap.acpBinding
+    : snap.savedAcpBinding && snap.savedAcpBinding.transport !== 'native'
+      ? snap.savedAcpBinding
+      : null
+  const activeProvider: AgentBrandProvider = activeExternalBinding
+    ? activeExternalBinding.provider
     : 'xerxes'
 
   useLayoutEffect(() => {
@@ -493,9 +500,10 @@ export function T3Sidebar({
     const snoozed = isSnoozedActive(inbox.snoozed, row.id, now)
     const wakeAt = inbox.snoozed[row.id]
     const snoozeOpen = snoozeMenuId === row.id
-    const rowBranch = row.branch || (row.cwd && row.cwd === snap.cwd ? snap.branch : '')
+    const rowBranch = row.branch || (row.contextId === undefined && row.cwd && row.cwd === snap.cwd ? snap.branch : '')
     const rowProvider: AgentBrandProvider = row.provider ?? (row.current ? activeProvider : 'xerxes')
     const displayAge = row.current && !row.age && tone !== 'working' ? 'now' : row.age
+    const liveCurrentAge = tone === 'working' && row.current && snap.turnActive
 
     if (variant === 'settled') {
       return (
@@ -563,7 +571,9 @@ export function T3Sidebar({
                   {tone === 'working' ? (
                     <span className="t3-thread__status" data-status="working">
                       <span>acting</span>
-                      {row.age && <span className="sess__age">{row.age}</span>}
+                      {liveCurrentAge
+                        ? <ElapsedClock active since={snap.turnStartedAt} baseSeconds={snap.turnSeconds} format={elapsedOf} className="sess__age" />
+                        : row.age && <span className="sess__age">{row.age}</span>}
                     </span>
                   ) : tone === 'failed' ? (
                     <span className="t3-thread__status" data-status="failed">
@@ -595,7 +605,9 @@ export function T3Sidebar({
                     <span className="t3-thread__status" data-status="working">
                       <span className="sess__dot" data-status="working" />
                       <span>acting</span>
-                      {row.age && <span className="sess__age">{row.age}</span>}
+                      {liveCurrentAge
+                        ? <ElapsedClock active since={snap.turnStartedAt} baseSeconds={snap.turnSeconds} format={elapsedOf} className="sess__age" />
+                        : row.age && <span className="sess__age">{row.age}</span>}
                     </span>
                   ) : tone === 'failed' ? (
                     <span className="t3-thread__status" data-status="failed">
@@ -1009,7 +1021,14 @@ export function T3Sidebar({
                 .map(section => {
                   const folderRows: T3SidebarRow[] = section.kind === 'context'
                     ? section.rows
-                        .filter(row => !needle || row.title.toLowerCase().includes(needle))
+                        .filter(row => {
+                          if (needle && !row.title.toLowerCase().includes(needle)) return false
+                          const running = row.status === 'working' || row.status === 'running'
+                          if (pinnedIdSet.has(row.id)) return false
+                          if (!running && settledIdSet.has(row.id)) return false
+                          if (!running && isSnoozedActive(inbox.snoozed, row.id, now)) return false
+                          return true
+                        })
                         .map(row => ({
                           id: row.id,
                           key: row.id,
@@ -1147,7 +1166,7 @@ export function T3Sidebar({
                         return (
                           <div
                             key={section.key}
-                            className={`t3-folder${section.cwd === snap.cwd ? ' is-home' : ''}${folderMenu?.key === section.key ? ' has-menu' : ''}`}
+                            className={`t3-folder${section.kind !== 'context' && section.cwd === snap.cwd ? ' is-home' : ''}${folderMenu?.key === section.key ? ' has-menu' : ''}`}
                             data-project-folder={section.cwd}
                             data-collapsed={folded || undefined}
                           >
@@ -1371,7 +1390,7 @@ export function T3Sidebar({
                     <span>New thread</span>
                   </button>
                 )}
-                {typeof window !== 'undefined' && typeof window.xerxes?.openPath === 'function' && (
+                {typeof window !== 'undefined' && typeof window.xerxes?.fileAction === 'function' && (
                   <button
                     type="button"
                     role="menuitem"
@@ -1379,7 +1398,7 @@ export function T3Sidebar({
                     onClick={() => {
                       const target = folderMenu.cwd
                       setFolderMenu(null)
-                      void window.xerxes.openPath?.(target)
+                      void window.xerxes.fileAction?.('reveal', '.', target)
                     }}
                   >
                     <T3Icon name="folderOpen" size={13} />

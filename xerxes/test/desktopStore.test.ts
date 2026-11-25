@@ -61,7 +61,7 @@ const initializeResult = {
   branch: 'main',
   context_limit: 262_000,
   daemon_protocol: 35,
-  daemon_version: '0.8.58',
+  daemon_version: '0.8.59',
   daemon_build_id: 'current-build',
 }
 
@@ -750,7 +750,7 @@ describe('Store workspace folds', () => {
     expect(store.getSnapshot().connection).toBe('online')
     expect(store.getSnapshot().model).toBe('kimi-for-coding')
     const initialize = bridge.calls.find(call => call.method === 'initialize')
-    expect(initialize?.params).toMatchObject({ client_protocol: 35, client_version: '0.8.58' })
+    expect(initialize?.params).toMatchObject({ client_protocol: 35, client_version: '0.8.59' })
     expect(store.getSnapshot().daemonWarning).toBeNull()
   })
 
@@ -1531,6 +1531,59 @@ describe('Store workspace folds', () => {
       .filter((b): b is Extract<typeof b, { kind: 'user' }> => b.kind === 'user')
       .map(b => b.text)
     expect(rehydratedUsers).toEqual(['continue', 'switch to GLM Genmix v1 normalizer'])
+  })
+
+  test('live ACP steer and steerNow render exactly one user bubble regardless of steer_input, steer_applied, and RPC arrival order', async () => {
+    bridge.push('acp_status', {
+      session_id: store.getSnapshot().currentId,
+      binding: {
+        session_id: store.getSnapshot().currentId,
+        agent_id: 'antigravity',
+        name: 'Antigravity',
+        provider: 'antigravity',
+        transport: 'acp',
+        cwd: '/repo',
+        connected: true,
+      },
+    })
+    bridge.push('turn_begin', { user_input: 'initial task' })
+
+    const orders: ReadonlyArray<readonly ('input' | 'applied' | 'rpc')[]> = [
+      ['input', 'applied', 'rpc'],
+      ['input', 'rpc', 'applied'],
+      ['rpc', 'input', 'applied'],
+      ['rpc', 'applied', 'input'],
+      ['applied', 'input', 'rpc'],
+      ['applied', 'rpc', 'input'],
+    ]
+
+    for (const [idx, order] of orders.entries()) {
+      const text = `steer-order-${idx}-${order.join('-')}`
+      let capturedId = ''
+      let resolveRpc!: (value: Record<string, unknown>) => void
+      bridge.respondWith((method, params) => {
+        if (method === 'turn.steer') {
+          capturedId = String(params.client_steer_id ?? '')
+          return new Promise<Record<string, unknown>>(resolve => { resolveRpc = resolve })
+        }
+        return { ok: true }
+      })
+      const pendingCall = idx % 2 === 0 ? store.steer(text) : store.steerNow(text)
+      await Bun.sleep(0)
+      for (const step of order) {
+        if (step === 'input') bridge.push('steer_input', { content: text, client_steer_id: capturedId })
+        else if (step === 'applied') bridge.push('steer_applied', { session_id: store.getSnapshot().currentId, contents: [text], count: 1 })
+        else {
+          resolveRpc({ ok: true, disposition: 'live_steer' })
+          await pendingCall
+        }
+      }
+      expect(await pendingCall).toBe(true)
+      const occurrences = store.getSnapshot().blocks
+        .filter((b): b is Extract<typeof b, { kind: 'user' }> => b.kind === 'user' && b.text === text)
+      expect(occurrences).toHaveLength(1)
+    }
+    expect(store.getSnapshot().queue).toHaveLength(0)
   })
 
   test('cancel falls back to acp.cancel only when turn.cancel returns ok:false on a connected external ACP session', async () => {

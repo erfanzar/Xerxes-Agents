@@ -7,6 +7,7 @@ import { OutputViewer, readableOutput } from './OutputViewer.js'
 import { Icon } from './Icon.js'
 import { commandGist } from './commandGist.js'
 import { elapsedOf } from './duration.js'
+import { ElapsedClock } from './ElapsedClock.js'
 
 /** A bounded summary first; read only this command's retained output on expansion. */
 export function CommandActivity({ row, sessionKey, online }: {row: RpcRecord; sessionKey: string; online: boolean}): ReactElement {
@@ -65,7 +66,9 @@ export function CommandActivity({ row, sessionKey, online }: {row: RpcRecord; se
       {!online
         ? <span className="command-activity__state">Disconnected</span>
         : running ? <span className="command-activity__state">running</span> : null}
-      {elapsed && <span className="command-activity__elapsed">{elapsed}</span>}
+      {running && online && started !== null
+        ? <ElapsedClock active since={started} baseSeconds={seconds ?? 0} format={elapsedOf} className="command-activity__elapsed" />
+        : elapsed && <span className="command-activity__elapsed">{elapsed}</span>}
     </summary>
     {/* Open: `$ command`, its output, a hairline, then one sentence saying how it ended. */}
     {open && <div className="command-activity__body">

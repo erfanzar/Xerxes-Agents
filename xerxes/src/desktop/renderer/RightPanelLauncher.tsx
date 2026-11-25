@@ -122,6 +122,7 @@ export function RightPanelLauncher({
     const onKey = (event: KeyboardEvent): void => {
       if (event.defaultPrevented || snapOverlayOpen || hasBlockingLauncherOverlay(rootRef.current)) return
       if (event.key === 'Escape' && !event.metaKey && !event.ctrlKey && !event.altKey) {
+        if (isEditableEventTarget(event.target)) return
         event.preventDefault()
         event.stopPropagation()
         onClose()

@@ -1519,16 +1519,19 @@ async function runDaemonOwned(
     if (process.platform !== "win32") {
       process.off("SIGHUP", ignoreSighup);
     }
-    process.stderr?.off("error", ignoreBrokenPipe);
-    process.stdout?.off("error", ignoreBrokenPipe);
     process.off("SIGINT", finish);
     process.off("SIGTERM", finish);
-    await daemon.stop();
-    await workspaces.close();
-    reactionMailbox.close();
-    runHistory.close();
-    goalTokenLedger.close();
-    closeModelUsageLedger();
+    try {
+      await daemon.stop();
+      await workspaces.close();
+      reactionMailbox.close();
+      runHistory.close();
+      goalTokenLedger.close();
+      closeModelUsageLedger();
+    } finally {
+      process.stderr?.off("error", ignoreBrokenPipe);
+      process.stdout?.off("error", ignoreBrokenPipe);
+    }
   }
 }
 
