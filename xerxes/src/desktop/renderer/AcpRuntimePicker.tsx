@@ -23,10 +23,8 @@ import {
 
 import { ActionDialog } from './ActionDialog.js'
 import { CopyButton } from './CopyButton.js'
-import { desktopError } from './desktopRpc.js'
 import { Icon } from './Icon.js'
 import { PickerLayer } from './Overlays.js'
-import { agyQuickTransferSource, agyTransferDetail, type AgyStatusView, type AgyTransferMode } from './ProviderAccountsCenter.js'
 import {
   store,
   type AcpAuthMethodInfo,
@@ -36,6 +34,7 @@ import {
   type AcpExternalModeOption,
   type AcpExternalModelOption,
   type AcpExternalThoughtLevelOption,
+  type AcpLoginStatus,
   type AcpSessionBinding,
   type Snapshot,
 } from './store.js'
@@ -1487,15 +1486,6 @@ export function isAcpAuthError(message: string): boolean {
   return /\b(auth(?:entication|orization)?\s+required|unauthenticated|not signed in|sign\s*in|login\s+required|-32000)\b/i.test(message)
 }
 
-interface AgyQuickTransferState {
-  readonly mode: AgyTransferMode
-  readonly label: string
-  readonly destination: string
-  readonly phase: 'reviewing' | 'ready' | 'working' | 'done'
-  readonly review?: string
-  readonly error: string
-}
-
 function formatTerminalAuthCommand(
   method: AcpAuthMethodInfo,
   result?: { readonly command?: string; readonly args?: readonly string[] },
@@ -1526,6 +1516,238 @@ function isTerminalAuthMethod(method: AcpAuthMethodInfo): boolean {
   return Boolean(method.meta && 'terminal-auth' in method.meta)
 }
 
+export interface AntigravityLoginDialogProps {
+  readonly open: boolean
+  readonly onClose: () => void
+  readonly onSuccess: () => Promise<unknown> | unknown
+}
+
+/**
+ * Interactive native `agy acp --login` dialog for both local and remote SSH hosts.
+ * Runs `agy acp --login` on the active daemon host (never copying or scraping tokens),
+ * displays the official Google OAuth URL, accepts the pasted authorization code when
+ * running headless/SSH, and connects Antigravity as soon as `agy` exits cleanly.
+ */
+export function AntigravityLoginDialog({
+  open,
+  onClose,
+  onSuccess,
+}: AntigravityLoginDialogProps): ReactElement | null {
+  const [status, setStatus] = useState<AcpLoginStatus | null>(null)
+  const [code, setCode] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState('')
+  const [attempt, setAttempt] = useState(0)
+  const activeLoginIdRef = useRef('')
+  const completedRef = useRef(false)
+
+  useEffect(() => {
+    if (!open) {
+      if (activeLoginIdRef.current) {
+        void store.cancelAcpLogin(activeLoginIdRef.current)
+        activeLoginIdRef.current = ''
+      }
+      setStatus(null)
+      setCode('')
+      setSubmitting(false)
+      setError('')
+      completedRef.current = false
+      return
+    }
+
+    let live = true
+    completedRef.current = false
+    setStatus({ ok: true, login_id: '', phase: 'starting', needs_code: false })
+    setCode('')
+    setSubmitting(false)
+    setError('')
+
+    let pollTimer: ReturnType<typeof setInterval> | undefined
+    const stopPoll = () => {
+      if (pollTimer !== undefined) {
+        clearInterval(pollTimer)
+        pollTimer = undefined
+      }
+    }
+
+    const handleComplete = () => {
+      if (completedRef.current || !live) return
+      completedRef.current = true
+      stopPoll()
+      activeLoginIdRef.current = ''
+      onClose()
+      void onSuccess()
+    }
+
+    void store.startAcpLogin('antigravity').then(initial => {
+      if (!live) {
+        if (initial.login_id) void store.cancelAcpLogin(initial.login_id)
+        return
+      }
+      activeLoginIdRef.current = initial.login_id
+      setStatus(initial)
+      if (initial.phase === 'done') {
+        handleComplete()
+        return
+      }
+      if (initial.phase === 'error' || !initial.ok) {
+        setError(initial.error || 'Could not start Antigravity sign-in.')
+        return
+      }
+      if (initial.login_id) {
+        pollTimer = setInterval(() => {
+          const currentId = activeLoginIdRef.current
+          if (!live || !currentId) return
+          void store.pollAcpLogin(currentId).then(next => {
+            if (!live) return
+            setStatus(next)
+            if (next.phase === 'done') {
+              handleComplete()
+            } else if (next.phase === 'error' || !next.ok) {
+              stopPoll()
+              setError(next.error || 'Antigravity sign-in failed.')
+            }
+          })
+        }, 800)
+      }
+    })
+
+    return () => {
+      live = false
+      stopPoll()
+      if (activeLoginIdRef.current && !completedRef.current) {
+        void store.cancelAcpLogin(activeLoginIdRef.current)
+        activeLoginIdRef.current = ''
+      }
+    }
+  }, [open, attempt])
+
+  if (!open) return null
+
+  const authUrl = status?.authorization_url ?? ''
+  const isError = status?.phase === 'error' || Boolean(error)
+  const isStarting = !status || status.phase === 'starting'
+  const showCodeField = Boolean(authUrl) && !isError
+
+  const openSignInUrl = (): void => {
+    if (!authUrl) return
+    if (typeof window !== 'undefined' && window.xerxes?.openExternal) {
+      void window.xerxes.openExternal(authUrl).catch(() => undefined)
+      return
+    }
+    if (typeof window !== 'undefined' && typeof window.open === 'function') {
+      window.open(authUrl, '_blank', 'noopener,noreferrer')
+    }
+  }
+
+  const handleConfirm = async (): Promise<void> => {
+    if (isError) {
+      setAttempt(value => value + 1)
+      return
+    }
+    const loginId = activeLoginIdRef.current || status?.login_id || ''
+    if (!loginId) return
+    const trimmed = code.trim()
+    if (!trimmed) {
+      setError('Paste the authorization code or callback URL from Google.')
+      return
+    }
+    setSubmitting(true)
+    setError('')
+    try {
+      const next = await store.submitAcpLoginCode(loginId, trimmed)
+      setStatus(next)
+      if (next.phase === 'done') {
+        completedRef.current = true
+        activeLoginIdRef.current = ''
+        onClose()
+        void onSuccess()
+      } else if (next.phase === 'error' || !next.ok) {
+        setError(next.error || 'Antigravity could not verify the authorization code.')
+      }
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  const handleCancel = (): void => {
+    if (activeLoginIdRef.current) {
+      void store.cancelAcpLogin(activeLoginIdRef.current)
+      activeLoginIdRef.current = ''
+    }
+    onClose()
+  }
+
+  return (
+    <ActionDialog
+      title="Login with Antigravity"
+      confirmLabel={isError ? 'Try again' : 'Verify & connect'}
+      busyLabel="Verifying sign-in…"
+      busy={submitting || status?.phase === 'verifying'}
+      disabled={!isError && (isStarting || !code.trim())}
+      error={error}
+      onConfirm={() => void handleConfirm()}
+      onCancel={handleCancel}
+    >
+      {isStarting && !authUrl && !isError ? (
+        <p role="status">Starting Antigravity sign-in (<code>agy acp --login</code>)…</p>
+      ) : authUrl ? (
+        <div className="acp-login-flow">
+          <p>
+            Open the Google sign-in link below in your browser
+            {status?.needs_code
+              ? ', then paste the authorization code (or landing URL) here.'
+              : '. If Google shows an authorization code instead of redirecting automatically, paste it below.'}
+          </p>
+          <div className="acp-login-flow__linkrow">
+            <button type="button" className="btn btn--primary" onClick={openSignInUrl}>
+              Open Google sign-in
+            </button>
+            <CopyButton text={authUrl} label="Copy link" />
+          </div>
+          <input
+            type="text"
+            className="acp-login-flow__url"
+            readOnly
+            aria-label="Google sign-in URL"
+            value={authUrl}
+            onFocus={event => event.currentTarget.select()}
+          />
+          {showCodeField && (
+            <label className="acp-login-flow__field">
+              <span>Authorization code or callback URL</span>
+              <input
+                type="text"
+                className="acp-login-flow__code"
+                aria-label="Authorization code"
+                placeholder="Paste the code or full callback URL from Google"
+                spellCheck={false}
+                autoComplete="off"
+                value={code}
+                disabled={submitting}
+                onChange={event => {
+                  setCode(event.target.value)
+                  if (error) setError('')
+                }}
+                onKeyDown={event => {
+                  if (event.key === 'Enter' && code.trim() && !submitting) {
+                    event.preventDefault()
+                    void handleConfirm()
+                  }
+                }}
+              />
+            </label>
+          )}
+        </div>
+      ) : (
+        <p className="studio-muted">
+          Signs in directly through Antigravity on this host using <code>agy acp --login</code>.
+        </p>
+      )}
+    </ActionDialog>
+  )
+}
+
 /**
  * Quiet Claude Code-style composer notice bar for ACP errors/auth recovery
  * and saved-session reconnects. Returns null during normal connected operation
@@ -1554,34 +1776,14 @@ export function AcpActiveBanner({
     && (/\b(antigravity|agy)\b/i.test(acpError)
       || binding?.provider === 'antigravity'
       || (!binding && savedBinding?.provider === 'antigravity'))
-  const [agyStatus, setAgyStatus] = useState<AgyStatusView | null>(null)
-  const [transfer, setTransfer] = useState<AgyQuickTransferState | null>(null)
+  const [agyLoginOpen, setAgyLoginOpen] = useState(false)
   const [authBusyId, setAuthBusyId] = useState<string | null>(null)
   const [terminalCommand, setTerminalCommand] = useState<{ readonly label: string; readonly command: string } | null>(null)
-  const transferReq = useRef(0)
 
   useEffect(() => {
     setTerminalCommand(null)
     setAuthBusyId(null)
   }, [acpError, authMethods.length])
-
-  useEffect(() => {
-    if (!isAntigravityAuthError || typeof window === 'undefined' || !window.xerxes?.accounts) {
-      setAgyStatus(null)
-      return
-    }
-    let cancelled = false
-    void window.xerxes.accounts('agy-status', {})
-      .then(raw => {
-        if (cancelled || !raw || typeof raw !== 'object') return
-        const view = raw as AgyStatusView
-        if (Array.isArray(view.sources)) setAgyStatus(view)
-      })
-      .catch(() => {
-        if (!cancelled) setAgyStatus(null)
-      })
-    return () => { cancelled = true }
-  }, [isAntigravityAuthError])
 
   if (!acpError && !savedBinding) return null
 
@@ -1599,11 +1801,13 @@ export function AcpActiveBanner({
     || isAcpAuthError(acpError)
     || /\b(antigravity|agy|claude)\b/i.test(acpError),
   )
-  const transferSource = agyQuickTransferSource(agyStatus)
-  const transferMode = transferSource?.mode ?? null
 
   const runAuthMethod = async (method: AcpAuthMethodInfo): Promise<void> => {
     if (authBusyId || connecting || !online) return
+    if (isAntigravityAuthError && isTerminalAuthMethod(method)) {
+      setAgyLoginOpen(true)
+      return
+    }
     setAuthBusyId(method.id)
     try {
       const result = await store.authenticateAcp(method.id)
@@ -1622,68 +1826,6 @@ export function AcpActiveBanner({
     }
   }
 
-  const startTransferReview = async (): Promise<void> => {
-    if (!transferMode || typeof window === 'undefined' || !window.xerxes?.accounts) return
-    const req = ++transferReq.current
-    const label = transferSource?.label ?? 'Antigravity credentials'
-    const destination = agyStatus?.destination ?? 'this SSH host'
-    setTransfer({ mode: transferMode, label, destination, phase: 'reviewing', error: '' })
-    try {
-      const reviewed = await window.xerxes.accounts('agy-sync-review', {
-        mode: transferMode,
-        ...(transferSource?.accountId ? { accountId: transferSource.accountId } : {}),
-      }) as { ok?: boolean; review?: string; label?: string; destination?: string; error?: string }
-      if (transferReq.current !== req) return
-      if (reviewed.ok === false || typeof reviewed.review !== 'string') {
-        throw new Error(reviewed.error || 'Could not review Antigravity credential transfer')
-      }
-      setTransfer({
-        mode: transferMode,
-        label: reviewed.label || label,
-        destination: reviewed.destination || destination,
-        phase: 'ready',
-        review: reviewed.review,
-        error: '',
-      })
-    } catch (error) {
-      if (transferReq.current === req) {
-        setTransfer({ mode: transferMode, label, destination, phase: 'ready', error: desktopError(error) })
-      }
-    }
-  }
-
-  const confirmTransfer = async (): Promise<void> => {
-    if (!transfer || typeof window === 'undefined' || !window.xerxes?.accounts) return
-    if (transfer.phase === 'done') {
-      setTransfer(null)
-      return
-    }
-    if (transfer.phase !== 'ready') return
-    if (!transfer.review) {
-      void startTransferReview()
-      return
-    }
-    const req = transferReq.current
-    setTransfer({ ...transfer, phase: 'working', error: '' })
-    try {
-      const res = await window.xerxes.accounts('agy-sync', { review: transfer.review, confirm: true }) as { ok?: boolean; error?: string }
-      if (transferReq.current !== req) return
-      if (res.ok === false) throw new Error(res.error || 'Could not transfer Antigravity credentials')
-      setTransfer(null)
-      await (onRetry ? onRetry() : store.retryAcpConnect())
-    } catch (error) {
-      if (transferReq.current === req) {
-        setTransfer({
-          mode: transfer.mode,
-          label: transfer.label,
-          destination: transfer.destination,
-          phase: 'ready',
-          error: desktopError(error),
-        })
-      }
-    }
-  }
-
   if (acpError) {
     return (
       <>
@@ -1695,7 +1837,7 @@ export function AcpActiveBanner({
             <span>{acpError}</span>
             {showAuthHint && (
               <span className="acp-banner__hint">
-                {' '}Run <code>agy acp --login</code> in your terminal, then click Retry.
+                {' '}Click Login with Antigravity or run <code>agy acp --login</code> in your terminal, then click Retry.
               </span>
             )}
             {terminalCommand && (
@@ -1713,7 +1855,7 @@ export function AcpActiveBanner({
                 <button
                   key={method.id}
                   type="button"
-                  className={`acp-banner__switch${index === 0 && !transferMode ? ' acp-banner__switch--primary' : ''}`}
+                  className={`acp-banner__switch${index === 0 && !isAntigravityAuthError ? ' acp-banner__switch--primary' : ''}`}
                   data-auth-method-id={method.id}
                   data-auth-method-type={isTerm ? 'terminal' : (method.type || 'agent')}
                   title={method.description || (termPreview ? `Run ${termPreview}` : `Authenticate with ${method.name}`)}
@@ -1724,20 +1866,20 @@ export function AcpActiveBanner({
                 </button>
               )
             })}
-            {transferMode && (
+            {isAntigravityAuthError && (
               <button
                 type="button"
                 className="acp-banner__switch acp-banner__switch--primary"
-                disabled={connecting || !online || transfer?.phase === 'working'}
-                onClick={() => void startTransferReview()}
+                disabled={connecting || !online}
+                onClick={() => setAgyLoginOpen(true)}
               >
-                Transfer from this Mac
+                Login with Antigravity
               </button>
             )}
             {canRetry && (
               <button
                 type="button"
-                className={`acp-banner__switch${transferMode || authMethods.length > 0 ? '' : ' acp-banner__switch--primary'}`}
+                className={`acp-banner__switch${isAntigravityAuthError || authMethods.length > 0 ? '' : ' acp-banner__switch--primary'}`}
                 disabled={connecting || !online}
                 onClick={() => void (onRetry ? onRetry() : store.retryAcpConnect())}
               >
@@ -1765,28 +1907,11 @@ export function AcpActiveBanner({
             </button>
           </div>
         </div>
-        {transfer && (
-          <ActionDialog
-            title={`Transfer ${transfer.label} to SSH`}
-            confirmLabel={!transfer.review && transfer.phase === 'ready' ? 'Review transfer again' : 'Transfer & connect'}
-            busyLabel="Transferring credentials…"
-            busy={transfer.phase === 'working'}
-            disabled={transfer.phase === 'reviewing'}
-            done={transfer.phase === 'done'}
-            error={transfer.error}
-            onConfirm={() => void confirmTransfer()}
-            onCancel={() => { transferReq.current += 1; setTransfer(null) }}
-          >
-            {transfer.phase === 'reviewing' ? (
-              <p role="status">Preparing credential transfer review for <strong>{transfer.destination}</strong>…</p>
-            ) : (
-              <>
-                <p>Transfer your local <strong>{transfer.label}</strong> credentials to <strong>{transfer.destination}</strong> and connect Antigravity?</p>
-                <p className="studio-muted">{agyTransferDetail(transfer.mode)}</p>
-              </>
-            )}
-          </ActionDialog>
-        )}
+        <AntigravityLoginDialog
+          open={agyLoginOpen}
+          onClose={() => setAgyLoginOpen(false)}
+          onSuccess={() => (onRetry ? onRetry() : store.retryAcpConnect())}
+        />
       </>
     )
   }

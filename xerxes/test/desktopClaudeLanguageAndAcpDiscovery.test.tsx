@@ -924,5 +924,29 @@ describe('Part 2 — Automatic ACP Skill & Runtime Feature Discovery + Strict Is
     expect(artHtml).toContain(pngDataUrl)
     expect(artHtml).not.toContain('aria-label="Edit artifact"')
     expect(artHtml).not.toContain('aria-label="Copy artifact"')
+
+    // Antigravity auth error banner offers native "Login with Antigravity" instead of SSH credential transfer.
+    const authBannerHtml = renderToStaticMarkup(
+      createElement(AcpActiveBanner, {
+        snap: sampleSnapshot({
+          acpError: 'Antigravity is not signed in. Click Login with Antigravity (or run `agy acp --login`), then retry.',
+          acpAuthRequired: true,
+        }),
+      }),
+    )
+    expect(authBannerHtml).toContain('Login with Antigravity')
+    expect(authBannerHtml).not.toContain('Transfer from this Mac')
+    expect(authBannerHtml).not.toContain('Transfer Google Cloud ADC')
+
+    // Store login methods dispatch acp.login actions cleanly.
+    const loginStart = await store.startAcpLogin('antigravity')
+    expect(loginStart.phase).toBeDefined()
+    await store.submitAcpLoginCode('login-1', '4/0A-code')
+    await store.cancelAcpLogin('login-1')
+    expect(bridge.calls.filter(c => c.method === 'acp.login').map(c => c.params.action)).toEqual([
+      'start',
+      'submit',
+      'cancel',
+    ])
   })
 })

@@ -7,6 +7,12 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.56 — 2026-11-25
+
+- **Native Login with Antigravity (`agy acp --login`).** Replaces the old local-credential transfer buttons in the model picker and ACP banner with an interactive **Login with Antigravity** flow (`acp.login` RPC) that runs `agy acp --login` directly on the target daemon host (local or remote SSH), captures the Google OAuth URL, handles browser callback or pasted auth codes on headless SSH hosts, and auto-connects once signed in.
+- **Transferred SSH Claude & Codex credentials run directly on the host.** Passes each profile's `oauth_account_id` and `isolated_auth` through `provider_list { with_readiness: true }` into `providerReadiness.ts` so Account Center-transferred Claude (`~/.xerxes/provider-accounts/<id>/auth/anthropic-oauth.json`) and Codex (`.codex/auth.json`) accounts report ready without requiring a global host login, and updates Desktop `useHostSignIn` to adopt a host-ready transferred profile of the same provider instead of falling back to `via this Mac`.
+- **Antigravity (`agy acp`) steps checklist, remaining count & live `update_focus`.** Broadens `update_steps` parsing (all title variants, JSON-stringified steps, and `skipped` status), persists checklists even when an ACP turn aborts or cancels, preserves `update_steps` across `session/load` replay and read-only brain `transcript.jsonl` reloads, projects `update_focus` into the live composer status phrase, and adds an inline expandable Steps checklist with remaining count (`N left · done/total`) above the Desktop composer.
+
 ## 0.8.55 — 2026-11-25
 
 - **Read-only Antigravity (`agy`) brain image rendering.** Projects `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, and `.svg` images stored inside the active Antigravity session's brain directory (`agy:<filename>`) into the Artifacts panel with strict `realpath` containment and magic-byte / SVG validation, renders `<agent-embed src="file:///.../brain/.../*.png">` inline via `ChatImage`, and supports remote SSH Antigravity brain image previews via read-only `artifacts.read`.

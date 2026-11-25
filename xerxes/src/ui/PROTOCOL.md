@@ -3023,6 +3023,12 @@ the foreground turn queue; `acp.agents`, `acp.catalog`, and `acp.sessions` are r
   Runs the ACP `authenticate` handshake for an advertised `authMethod` (or
   returns the terminal auth launch specification when the method is a terminal
   login flow such as `agy acp --login`).
+- `acp.login` `{ action: "start" | "status" | "submit" | "cancel", login_id?, code?, agent_id?, cwd?, session_id?, session_key? }`
+  → `{ ok, login_id, phase, needs_code, authorization_url?, error? }`.
+  Drives the official interactive `agy acp --login` flow directly on the daemon
+  host (local or remote SSH): captures the Google OAuth URL from stdout/stderr,
+  accepts the user's pasted authorization code on stdin when headless, and
+  reports completion without reading or transferring external OAuth tokens.
 - `acp.sessions` `{ session_id?, session_key?, cursor?, cwd? }`
   → `{ ok: true, sessions: AcpListedSession[], next_cursor?: string }` or `{ ok: false, error: string }`.
   Lists resumable external ACP sessions via `session/list` when advertised by

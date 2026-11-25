@@ -285,3 +285,151 @@ test('a host-ready sign-in row is no longer forced through this computer', () =>
   expect(runsOnThisComputer(ssh, { signsIn: true, ready: true })).toBe(false)
   expect(runsOnThisComputer({ storageScope: 'local' }, { signsIn: true })).toBe(false)
 })
+
+test('transferred named Claude and Codex accounts report ready without global host logins and avoid via-Mac relay', async () => {
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'xpr-transferred-')))
+  const accountsRoot = join(dir, '.xerxes', 'provider-accounts')
+  const claudeAccountId = '11111111-2222-3333-4444-555555555555'
+  const codexAccountId = '66666666-7777-8888-9999-aaaaaaaaaaaa'
+  const emptyAccountId = 'bbbbbbbb-cccc-dddd-eeee-ffffffffffff'
+  try {
+    await mkdir(join(accountsRoot, claudeAccountId, 'auth'), { recursive: true })
+    await Bun.write(
+      join(accountsRoot, claudeAccountId, 'auth', 'anthropic-oauth.json'),
+      JSON.stringify({ access: 'synthetic-claude-access', refresh: 'synthetic-claude-refresh', expires: Date.now() + 3600_000 }),
+    )
+    await mkdir(join(accountsRoot, codexAccountId, '.codex'), { recursive: true })
+    await Bun.write(
+      join(accountsRoot, codexAccountId, '.codex', 'auth.json'),
+      JSON.stringify({ tokens: { access_token: 'synthetic-codex-access', refresh_token: 'synthetic-codex-refresh' } }),
+    )
+
+    // Global host sign-ins are absent, yet transferred accounts must still report ready.
+    const probe = createSignInReadinessProbe({
+      environment: { HOME: dir },
+      homeDirectory: dir,
+      accountsRoot,
+      executable: installed,
+      login: async () => { throw new ConfigurationError('claude_code', 'No global Claude login.') },
+      codexExecutable: installed,
+      codexSession: { stored: async () => undefined },
+      codexCliTokens: async () => undefined,
+      cacheMs: 0,
+    })
+    expect((await probe('claude-code')).state).toBe('not_signed_in')
+    expect((await probe('claude-code', { oauthAccountId: claudeAccountId, isolatedAuth: true })).state).toBe('ready')
+    expect((await probe('claude-code', { oauthAccountId: emptyAccountId, isolatedAuth: true })).state).toBe('not_signed_in')
+    expect((await probe('openai-codex')).state).toBe('not_signed_in')
+    expect((await probe('openai-codex', { oauthAccountId: codexAccountId, isolatedAuth: true })).state).toBe('ready')
+    expect((await probe('openai-codex', { oauthAccountId: emptyAccountId, isolatedAuth: true })).state).toBe('not_signed_in')
+
+    // Verify provider_list { with_readiness: true } propagates oauth_account_id to the probe.
+    const runtime = new InMemoryDaemonRuntime(undefined, { currentProjectDirectory: dir, sessionDirectory: join(dir, 'sessions') })
+    const profiles = new ProfileStore(join(dir, 'profiles.json'))
+    profiles.save({
+      name: 'claude-Work',
+      provider: 'claude-code',
+      model: 'claude-code/opus',
+      apiKey: '',
+      baseUrl: 'https://api.anthropic.com',
+      oauthAccountId: claudeAccountId,
+      isolatedAuth: true,
+    })
+    profiles.save({
+      name: 'codex-Work',
+      provider: 'openai-codex',
+      model: 'gpt-6.1-sol',
+      apiKey: '',
+      baseUrl: 'https://chatgpt.com/backend-api/codex',
+      oauthAccountId: codexAccountId,
+      isolatedAuth: true,
+    })
+    const server = new DaemonServer({
+      runtime,
+      socketPath: join(dir, 'd.sock'),
+      projectDirectory: dir,
+      profileStore: profiles,
+      providerReadiness: probe,
+    })
+    await server.start()
+    const rpc = new DaemonRpc({ socketPath: join(dir, 'd.sock'), projectDir: dir, deadlineMs: 3000 })
+    try {
+      await rpc.call('initialize', {})
+      const res = await rpc.call('provider_list', { with_readiness: true })
+      const list = res.profiles as Array<Record<string, unknown>>
+      expect(list.find(row => row.name === 'claude-code')).toMatchObject({ ready: false, ready_state: 'not_signed_in' })
+      expect(list.find(row => row.name === 'claude-Work')).toMatchObject({ signs_in: true, ready: true, ready_state: 'ready' })
+      expect(list.find(row => row.name === 'codex-Work')).toMatchObject({ signs_in: true, ready: true, ready_state: 'ready' })
+    } finally {
+      rpc.dispose()
+      await server.stop()
+      await runtime.shutdown()
+    }
+
+    // DesktopProviderForwarding adopts a transferred host-ready same-provider profile instead of relaying via Mac.
+    const remoteCalls: Array<{ method: string; params: Record<string, unknown> }> = []
+    let grants = 0
+    const forwarding = new DesktopProviderForwarding(
+      async method => {
+        if (method === 'provider.relay.inventory') {
+          return {
+            ok: true,
+            profiles: [{
+              name: 'claude-code',
+              model: 'claude-code/opus',
+              supported: true,
+              credential_source: 'local provider authentication or environment',
+              output_limit_mode: 'request-bound',
+            }],
+          }
+        }
+        if (method === 'provider.relay.authorize') {
+          return { ok: true, grant: { id: String(++grants).repeat(32) } }
+        }
+        return { ok: true }
+      },
+      async (method, params) => {
+        remoteCalls.push({ method, params })
+        if (method === 'provider_list') {
+          return {
+            ok: true,
+            readiness_supported: true,
+            profiles: [
+              { name: 'claude-code', provider: 'claude-code', model: 'claude-code/opus', signs_in: true, ready: false },
+              { name: 'claude-Work', provider: 'claude-code', model: 'claude-code/opus', signs_in: true, ready: true },
+            ],
+          }
+        }
+        if (method === 'set_model') return { ok: true, host_credentials: true }
+        return {
+          ok: true,
+          provider_binding_session_guard_supported: true,
+          provider_binding_busy: false,
+          provider_binding_lost: false,
+          session: { key: 'task', cwd: '/project', status: 'idle', turn_count: 0 },
+        }
+      },
+      'tpu-host',
+      '/project',
+      async () => 'claude-code',
+    )
+    try {
+      expect(await forwarding.follow()).toEqual({ status: 'skipped', reason: 'the host has its own claude-code sign-in' })
+      expect(grants).toBe(0)
+      expect(remoteCalls.find(call => call.method === 'set_model')?.params).toEqual({
+        model: 'claude-code/opus',
+        provider_profile: 'claude-Work',
+        session_key: 'task',
+      })
+      expect(await forwarding.current()).toMatchObject({
+        bound: false,
+        destination: 'tpu-host',
+        onHost: { profile: 'claude-Work', model: 'claude-code/opus' },
+      })
+    } finally {
+      await forwarding.disconnect()
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})

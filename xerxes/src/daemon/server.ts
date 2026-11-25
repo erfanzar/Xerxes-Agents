@@ -578,6 +578,7 @@ export const QUEUE_BYPASS_METHODS: ReadonlySet<string> = new Set([
   "acp.set_mode",
   "acp.set_config_option",
   "acp.authenticate",
+  "acp.login",
   "acp.sessions",
   "acp.fork",
 ]);
@@ -1853,6 +1854,20 @@ export class DaemonServer {
         this.notifySessionStateChanged(sessionId);
       } else if (event.type === "session_info" && event.title) {
         this.applyExternalSessionTitle(live, event.title);
+      } else if (event.type === "focus") {
+        const accepts = (conn: DaemonTransportConnection): boolean =>
+          this.runtime.sessionStatus(conn.activeSessionKey)?.id === sessionId;
+        this.broadcastEvent(
+          "status_update",
+          {
+            session_id: sessionId,
+            kind: "focus",
+            text: event.focus,
+          },
+          accepts,
+          [...this.sessionObservers],
+          live.cwd,
+        );
       } else if (event.type === "notice") {
         const level =
           event.severity === "error" || event.severity === "warning"
@@ -3202,6 +3217,7 @@ export class DaemonServer {
       method === "acp.set_mode" ||
       method === "acp.set_config_option" ||
       method === "acp.authenticate" ||
+      method === "acp.login" ||
       method === "acp.sessions" ||
       method === "acp.fork"
     ) {
@@ -4694,16 +4710,22 @@ export class DaemonServer {
       // daemon-wide default (changed from another conversation) must not be shown as what it uses:
       // that made a broken pinned sign-in look already switched, and re-picking it did nothing.
       const pinnedName = session ? this.sessionProfileName(session) : null;
-      const rows = this.profileStore.list().map(profile => profilePayload(pinnedName ? { ...profile, active: profile.name === pinnedName } : profile));
+      const profileList = this.profileStore.list();
+      const rows = profileList.map(profile => profilePayload(pinnedName ? { ...profile, active: profile.name === pinnedName } : profile));
       // False while only the built-in Claude Code fallback is "active": nothing runs on it until chosen.
       const activeChosen = this.profileStore.activeIsExplicit();
       // Asked for by an SSH window deciding whether this host's own sign-in can run
       // a task instead of relaying it through the desktop. Only a state leaves here.
       const probe = this.providerReadiness;
       if (params.with_readiness !== true || !probe) return { ok: true, active_chosen: activeChosen, profiles: rows };
-      const readiness = await Promise.all(rows.map(row => row.signs_in === true
-        ? probe(String(row.provider)).catch((): SignInReadiness => ({ state: 'unknown' }))
-        : Promise.resolve(undefined)));
+      const readiness = await Promise.all(rows.map((row, index) => {
+        if (row.signs_in !== true) return Promise.resolve(undefined);
+        const profile = profileList[index];
+        return probe(String(row.provider), {
+          ...(profile?.oauth_account_id ? { oauthAccountId: profile.oauth_account_id } : {}),
+          ...(profile?.isolated_auth ? { isolatedAuth: true } : {}),
+        }).catch((): SignInReadiness => ({ state: 'unknown' }));
+      }));
       return {
         ok: true,
         active_chosen: activeChosen,
@@ -5912,7 +5934,15 @@ export class DaemonServer {
       ? acpCost?.amount
       : (session.model ? this.sessionCost(session, session.model) : undefined);
     const basis = liveAcpBinding ? undefined : this.sessionCostBasis(session);
-    const payload = sessionPayload(session, contextLimit, cost, mcpStatus, requestedHistory, historySession);
+    const payload = sessionPayload(
+      session,
+      contextLimit,
+      cost,
+      mcpStatus,
+      requestedHistory,
+      historySession,
+      this.resolveSessionTodos(session),
+    );
     const agyLoc = this.resolveAgyBrainLocationForSession(session);
     const agySubagents = agyLoc ? this.agyBrainBridge.listSubagentSnapshotsSync(agyLoc) : [];
     const existingSubagents = Array.isArray(payload.subagent_snapshots)
@@ -15171,6 +15201,34 @@ export class DaemonServer {
       return { ok: true, mode: "agent" };
     }
 
+    if (method === "acp.login") {
+      const action = (optionalString(params.action)?.trim().toLowerCase() ?? "start");
+      if (action === "start") {
+        const agentId = optionalString(params.agent_id)?.trim() || undefined;
+        const cwd = optionalString(params.cwd)?.trim() || target?.cwd;
+        const result = await this.acpBridgeHost.startAgyLogin({
+          ...(agentId ? { agentId } : {}),
+          ...(cwd ? { cwd: resolveProjectDirectory(cwd) } : {}),
+        });
+        return result as unknown as JsonRpcPayload;
+      }
+      const loginId = optionalString(params.login_id)?.trim() ?? "";
+      if (!loginId) {
+        return { ok: false, error: "login_id is required" };
+      }
+      if (action === "status") {
+        return this.acpBridgeHost.getAgyLoginStatus(loginId) as unknown as JsonRpcPayload;
+      }
+      if (action === "submit") {
+        const code = typeof params.code === "string" ? params.code : "";
+        return (await this.acpBridgeHost.submitAgyLoginCode(loginId, code)) as unknown as JsonRpcPayload;
+      }
+      if (action === "cancel") {
+        return this.acpBridgeHost.cancelAgyLogin(loginId) as unknown as JsonRpcPayload;
+      }
+      return { ok: false, error: `unsupported acp.login action "${action}"` };
+    }
+
     if (method === "acp.sessions") {
       if (!target) {
         return { ok: false, error: "no active session" };
@@ -15890,6 +15948,7 @@ export class DaemonServer {
       readonly is_error?: boolean;
     }> = [];
     const replayToolInputs = new Map<string, JsonObject>();
+    let replayPlanTodoText: string | undefined;
 
     const flushUser = (): void => {
       if (!pendingUserText) return;
@@ -15965,11 +16024,24 @@ export class DaemonServer {
           ...(event.contentBlocks?.length ? { content_blocks: event.contentBlocks } : {}),
           ...(event.locations?.length ? { locations: event.locations } : {}),
         });
+      } else if (event.type === "plan") {
+        const todoItems = formatAcpPlanTodoItems(event.entries);
+        replayPlanTodoText = formatAcpPlanTodoText(todoItems);
       }
     }
     flushUser();
     flushAssistant();
-    if (session.messages.length > 0) {
+    if (replayPlanTodoText !== undefined) {
+      session.toolExecutions.push({
+        toolCallId: "acp-plan-replay",
+        name: "TodoWriteTool",
+        inputs: {},
+        result: replayPlanTodoText,
+        permitted: true,
+        durationMs: 0,
+      });
+    }
+    if (session.messages.length > 0 || replayPlanTodoText !== undefined) {
       session.turnCount = Math.max(
         session.turnCount,
         session.messages.filter((msg) => msg.role === "user").length,
@@ -16408,6 +16480,7 @@ export class DaemonServer {
     }> = [];
     const recordedToolExecutions: Array<Record<string, unknown>> = [];
     let lastPlanTodoText: string | undefined;
+    let persistedPlanTodo = false;
 
     const effectivePermissionMode = session.permissionMode
       ?? (typeof this.runtime.status().permission_mode === "string"
@@ -16719,19 +16792,20 @@ export class DaemonServer {
               });
               break;
             }
+            case "focus": {
+              emit({
+                type: "status_update",
+                payload: {
+                  session_id: session.id,
+                  kind: "focus",
+                  text: event.focus,
+                },
+              });
+              break;
+            }
             case "plan": {
-              const todoItems = event.entries.map((entry, index) => ({
-                id: `plan-${index + 1}`,
-                content: entry.content,
-                status: normalizeAcpPlanStatus(entry.status),
-                ...(entry.priority ? { priority: entry.priority } : {}),
-              }));
-              const todoText = todoItems
-                .map((item, index) => {
-                  const mark = item.status === "completed" ? "x" : item.status === "in_progress" ? "~" : " ";
-                  return `${index + 1}. [${mark}] ${item.content}`;
-                })
-                .join("\n");
+              const todoItems = formatAcpPlanTodoItems(event.entries);
+              const todoText = formatAcpPlanTodoText(todoItems);
               session.inflightTodoResult = todoText;
               lastPlanTodoText = todoText;
               emit({
@@ -16816,6 +16890,7 @@ export class DaemonServer {
           permitted: true,
           durationMs: 0,
         });
+        persistedPlanTodo = true;
       }
       if (result.thinkingText.trim()) {
         session.thinkingContent.push(result.thinkingText);
@@ -16839,6 +16914,17 @@ export class DaemonServer {
       delete session.inflightThinking;
       delete session.inflightTools;
       delete session.inflightStartedAt;
+      if (!persistedPlanTodo && lastPlanTodoText !== undefined) {
+        session.toolExecutions.push({
+          toolCallId: `acp-plan-${turnId}`,
+          name: "TodoWriteTool",
+          inputs: {},
+          result: lastPlanTodoText,
+          permitted: true,
+          durationMs: 0,
+        });
+        persistedPlanTodo = true;
+      }
       delete session.inflightTodoResult;
       await this.runtime.flushSessions().catch(error => {
         console.error(`Could not persist external ACP turn: ${errorMessage(error)}`);
@@ -16897,6 +16983,24 @@ export class DaemonServer {
       externalSessionId: resolved.binding.external_session_id,
       ...(resolved.binding.command ? { bindingCommand: resolved.binding.command } : {}),
     });
+  }
+
+  private resolveSessionTodos(session: DaemonSession): readonly Record<string, unknown>[] {
+    if (session.inflightTodoResult !== undefined) {
+      return parseTodoList(session.inflightTodoResult);
+    }
+    const fromExecutions = todosFromExecutions(session.toolExecutions);
+    if (fromExecutions.length > 0) {
+      return fromExecutions;
+    }
+    const agyLocation = this.resolveAgyBrainLocationForSession(session);
+    if (!agyLocation) return fromExecutions;
+    const fromBrain = this.agyBrainBridge.readLatestUpdateStepsSync(agyLocation);
+    return fromBrain.map((item) => ({
+      id: item.id,
+      content: item.content,
+      status: item.status,
+    }));
   }
 
   private async resolveAllowedPreviewReadRootsForSession(
@@ -17568,18 +17672,8 @@ export class DaemonServer {
         break;
       }
       case "plan": {
-        const todoItems = event.entries.map((entry, index) => ({
-          id: `plan-${index + 1}`,
-          content: entry.content,
-          status: normalizeAcpPlanStatus(entry.status),
-          ...(entry.priority ? { priority: entry.priority } : {}),
-        }));
-        const todoText = todoItems
-          .map((item, index) => {
-            const mark = item.status === "completed" ? "x" : item.status === "in_progress" ? "~" : " ";
-            return `${index + 1}. [${mark}] ${item.content}`;
-          })
-          .join("\n");
+        const todoItems = formatAcpPlanTodoItems(event.entries);
+        const todoText = formatAcpPlanTodoText(todoItems);
         session.inflightTodoResult = todoText;
         wakeup.lastPlanTodoText = todoText;
         broadcastWake("tool_result", {
@@ -17590,6 +17684,15 @@ export class DaemonServer {
           duration_ms: 0,
           permitted: true,
           display_blocks: [{ type: "todo", items: todoItems }],
+        });
+        const doneCount = todoItems.filter((item) => item.status === "completed").length;
+        broadcastWake("status_update", {
+          session_id: session.id,
+          kind: "plan",
+          todos: todoItems,
+          text: todoItems.length === 0
+            ? "Plan cleared"
+            : `Plan updated (${doneCount}/${todoItems.length} completed)`,
         });
         break;
       }
@@ -18727,6 +18830,7 @@ function sessionPayload(
   mcpStatus: Record<string, unknown> = {},
   requestedHistory?: number,
   historySession: DaemonSession = session,
+  resolvedTodos?: readonly Record<string, unknown>[],
 ): JsonRpcPayload {
   const model = session.model;
   const contextTokens = sessionContextTokens(session, model);
@@ -18772,7 +18876,7 @@ function sessionPayload(
     message_count: session.messages.length,
     preview: (() => { const first = session.messages.find(message => message.role === 'user'); return first ? messageText(first).slice(0, 160) : ''; })(),
     ...(requestedHistory === undefined ? { transcript: transcript.messages } : requestedHistory > 0 ? { history: projectedHistoryPage(historySession, requestedHistory) } : {}),
-    todos: session.inflightTodoResult === undefined ? todosFromExecutions(session.toolExecutions) : parseTodoList(session.inflightTodoResult),
+    todos: resolvedTodos ?? (session.inflightTodoResult === undefined ? todosFromExecutions(session.toolExecutions) : parseTodoList(session.inflightTodoResult)),
     // Additive replay fields: the stored twins of the streamed tool calls and
     // per-turn reasoning, so a reopened transcript renders the same
     // think → tool rows the live stream did instead of dropping the activity.
@@ -20558,13 +20662,40 @@ function parseToolInputsObject(rawInput: unknown, argumentsText: string): JsonOb
 
 function normalizeAcpPlanStatus(status: string | undefined): "completed" | "in_progress" | "pending" {
   const lower = status?.trim().toLowerCase() ?? "";
-  if (lower === "completed" || lower === "done" || lower === "finished") {
+  if (lower === "completed" || lower === "done" || lower === "finished" || lower === "skipped") {
     return "completed";
   }
   if (lower === "in_progress" || lower === "in-progress" || lower === "running" || lower === "active") {
     return "in_progress";
   }
   return "pending";
+}
+
+function formatAcpPlanTodoItems(
+  entries: readonly { readonly content: string; readonly priority?: string; readonly status?: string }[],
+): Array<{
+  readonly id: string;
+  readonly content: string;
+  readonly status: "completed" | "in_progress" | "pending";
+  readonly priority?: string;
+}> {
+  return entries.map((entry, index) => ({
+    id: `plan-${index + 1}`,
+    content: entry.content,
+    status: normalizeAcpPlanStatus(entry.status),
+    ...(entry.priority ? { priority: entry.priority } : {}),
+  }));
+}
+
+function formatAcpPlanTodoText(
+  items: readonly { readonly content: string; readonly status: "completed" | "in_progress" | "pending" }[],
+): string {
+  return items
+    .map((item, index) => {
+      const mark = item.status === "completed" ? "x" : item.status === "in_progress" ? "~" : " ";
+      return `${index + 1}. [${mark}] ${item.content}`;
+    })
+    .join("\n");
 }
 
 function formatCompactUnifiedDiff(

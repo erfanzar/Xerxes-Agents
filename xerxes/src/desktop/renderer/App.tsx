@@ -173,6 +173,8 @@ const turnDurOf = (seconds: number): string => elapsedOf(seconds)
 function composerPhraseOf(snap: Snapshot): string {
   if (snap.networkRetrying) return 'Retrying connection…'
   if (snap.approval || snap.question) return 'Waiting for you'
+  const liveFocus = snap.liveFocus?.trim()
+  if (liveFocus) return liveFocus
   const action = currentActionOf(snap)?.verb
   if (action) return action
   // While the model reasons, its latest **Heading** says what it is working on.
@@ -4297,15 +4299,63 @@ export function ComposerTaskSummary({ snap }: { snap: Snapshot }): ReactElement 
   const current = todos.find(item => item.status === 'in_progress')
   const next = current ?? todos.find(item => item.status === 'pending')
   const viewingPlan = snap.tab === 'plan'
+  const [expandedPref, setExpandedPref] = useState<boolean | null>(null)
+  useEffect(() => { setExpandedPref(null) }, [snap.sessionKey])
   if (!viewingPlan && !visibleGoal && !todos.length && !snap.queue.length) return null
   const done = todos.filter(item => item.status === 'completed').length
+  const remaining = Math.max(0, todos.length - done)
+  const stepsExpanded = !viewingPlan && todos.length > 0 && (expandedPref ?? remaining > 0)
+  const statusSummary = remaining > 0 ? `${remaining} left · ${done}/${todos.length}` : `${done}/${todos.length}`
   return <section className="composer-task-summary" aria-label="Current task">
     {visibleGoal && <button onClick={() => open('activity')} title={visibleGoal.objective}><span className="composer-task-summary__label">Goal</span><span className="composer-task-summary__text">{activityVisible ? 'View goal details' : visibleGoal.objective}</span><span className="composer-task-summary__status">{visibleGoal.phase}</span></button>}
-    {(viewingPlan || todos.length > 0) && <button onClick={() => store.setTab(viewingPlan ? 'activity' : 'plan')} title={viewingPlan ? 'Return to the latest messages' : next?.content ?? 'View completed tasks'}>
-      {viewingPlan ? <><Icon name="chat" size={13} /><span className="composer-task-summary__text">Back to conversation</span></> : <>
-        <span className="composer-task-summary__label">{current ? 'Doing' : next ? 'Next' : 'To-dos'}</span><span className="composer-task-summary__text">{next?.content ?? 'All tasks completed'}</span><span className="composer-task-summary__status">{done}/{todos.length}</span>
-      </>}
+    {viewingPlan && <button onClick={() => store.setTab('activity')} title="Return to the latest messages">
+      <Icon name="chat" size={13} /><span className="composer-task-summary__text">Back to conversation</span>
     </button>}
+    {!viewingPlan && todos.length > 0 && (
+      <div className="composer-task-summary__todos">
+        <div className="composer-task-summary__row">
+          <button
+            type="button"
+            className="composer-task-summary__main"
+            onClick={() => store.setTab('plan')}
+            title={next?.content ?? 'View completed tasks'}
+          >
+            <span className="composer-task-summary__label">{current ? 'Doing' : next ? 'Next' : 'To-dos'}</span>
+            <span className="composer-task-summary__text">{next?.content ?? 'All tasks completed'}</span>
+            <span className="composer-task-summary__status">{statusSummary}</span>
+          </button>
+          <button
+            type="button"
+            className={`composer-task-summary__toggle${stepsExpanded ? ' is-open' : ''}`}
+            aria-expanded={stepsExpanded}
+            aria-label={stepsExpanded ? 'Hide steps' : 'Show steps'}
+            title={stepsExpanded ? 'Hide steps' : 'Show steps'}
+            onClick={() => setExpandedPref(!(expandedPref ?? remaining > 0))}
+          >
+            <Icon name="chevron" size={12} />
+          </button>
+        </div>
+        {stepsExpanded && (
+          <ol className="composer-task-summary__steps" aria-label="Steps">
+            {todos.map((item, index) => (
+              <li key={`${item.id}:${index}`} data-state={item.status}>
+                <span className="composer-task-summary__mark" aria-hidden="true">
+                  {item.status === 'completed'
+                    ? <Icon name="check" size={11} />
+                    : item.status === 'in_progress'
+                      ? <AgentOrb size={16} state={snap.turnActive ? orbStateOf(snap) : 'breathing'} live={snap.turnActive} />
+                      : null}
+                </span>
+                <span className="composer-task-summary__step-text">{item.content}</span>
+                <span className="sr-only">
+                  {item.status === 'completed' ? 'completed' : item.status === 'in_progress' ? 'in progress' : 'pending'}
+                </span>
+              </li>
+            ))}
+          </ol>
+        )}
+      </div>
+    )}
     {snap.queue.length > 0 && <div className="composer-queue"><div className="composer-queue__heading">Queued messages <span>{snap.queue.length}</span></div><div className="composer-queue__list">{snap.queue.map(item => <div className="composer-queue__message" key={item.id}><p>{item.text}</p><div className="composer-queue__actions">{snap.turnActive && <button type="button" className="composer-queue__steer" title="Stop the running step and send this message now" onClick={() => void store.promoteQueued(item.id)}>Steer now</button>}<button type="button" className="composer-queue__drop" aria-label="Hide queued message from view" title="Hide from view only — this does not cancel the queued message" onClick={() => store.dropQueued(item.id)}><Icon name="close" size={14} /></button></div></div>)}</div></div>}
   </section>
 }

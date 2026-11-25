@@ -232,6 +232,59 @@ export interface AcpAuthenticateResult {
   readonly error?: string
 }
 
+export type AcpLoginPhase =
+  | 'starting'
+  | 'awaiting_code'
+  | 'waiting_browser'
+  | 'verifying'
+  | 'done'
+  | 'error'
+  | 'cancelled'
+
+export interface AcpLoginStatus {
+  readonly ok: boolean
+  readonly login_id: string
+  readonly phase: AcpLoginPhase
+  readonly needs_code: boolean
+  readonly authorization_url?: string
+  readonly error?: string
+}
+
+export function parseAcpLoginStatus(value: unknown): AcpLoginStatus {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { ok: false, login_id: '', phase: 'error', needs_code: false, error: 'Invalid login response' }
+  }
+  const row = value as Readonly<Record<string, unknown>>
+  const rawPhase = typeof row.phase === 'string' ? row.phase : ''
+  const phase: AcpLoginPhase =
+    rawPhase === 'starting'
+    || rawPhase === 'awaiting_code'
+    || rawPhase === 'waiting_browser'
+    || rawPhase === 'verifying'
+    || rawPhase === 'done'
+    || rawPhase === 'error'
+    || rawPhase === 'cancelled'
+      ? rawPhase
+      : row.ok === false
+        ? 'error'
+        : 'starting'
+  const loginId = typeof row.login_id === 'string' ? row.login_id.trim() : ''
+  const authUrl = typeof row.authorization_url === 'string' && row.authorization_url.trim()
+    ? row.authorization_url.trim()
+    : undefined
+  const error = typeof row.error === 'string' && row.error.trim()
+    ? row.error.trim()
+    : undefined
+  return {
+    ok: row.ok !== false && phase !== 'error',
+    login_id: loginId,
+    phase,
+    needs_code: row.needs_code === true,
+    ...(authUrl ? { authorization_url: authUrl } : {}),
+    ...(error ? { error } : {}),
+  }
+}
+
 export interface AcpRuntimeCapabilities {
   readonly prompt: {
     readonly image: boolean
@@ -1423,6 +1476,7 @@ export interface Snapshot {
   readonly planMode: boolean
   readonly turnActive: boolean
   readonly networkRetrying?: boolean
+  readonly liveFocus?: string | null
   /**
    * The runtime is compacting this task's history: its latest progress line.
    * The task is busy and takes no new turn until it finishes, but nothing
@@ -2137,6 +2191,7 @@ export class Store {
       interactionHidden: false,
       planMode: false,
       turnActive: false, networkRetrying: false,
+      liveFocus: null,
       turnFailed: false,
       turnSeconds: 0,
       turnStartedAt: null,
@@ -2961,6 +3016,59 @@ export class Store {
       if (isCurrent()) this.patch({ acpError: err })
       return { ok: false, error: err }
     }
+  }
+
+  async startAcpLogin(agentId = 'antigravity'): Promise<AcpLoginStatus> {
+    try {
+      const result = await this.bridge.call(
+        'acp.login',
+        this.swarmParams({
+          action: 'start',
+          agent_id: agentId,
+          ...(this.frame.cwd ? { cwd: this.frame.cwd } : {}),
+        }),
+      )
+      return parseAcpLoginStatus(result)
+    } catch (error) {
+      return { ok: false, login_id: '', phase: 'error', needs_code: false, error: desktopError(error) }
+    }
+  }
+
+  async pollAcpLogin(loginId: string): Promise<AcpLoginStatus> {
+    const cleanId = loginId.trim()
+    if (!cleanId) return { ok: false, login_id: '', phase: 'error', needs_code: false, error: 'Missing login session id' }
+    try {
+      const result = await this.bridge.call(
+        'acp.login',
+        this.swarmParams({ action: 'status', login_id: cleanId }),
+      )
+      return parseAcpLoginStatus(result)
+    } catch (error) {
+      return { ok: false, login_id: cleanId, phase: 'error', needs_code: false, error: desktopError(error) }
+    }
+  }
+
+  async submitAcpLoginCode(loginId: string, code: string): Promise<AcpLoginStatus> {
+    const cleanId = loginId.trim()
+    if (!cleanId) return { ok: false, login_id: '', phase: 'error', needs_code: false, error: 'Missing login session id' }
+    try {
+      const result = await this.bridge.call(
+        'acp.login',
+        this.swarmParams({ action: 'submit', login_id: cleanId, code }),
+      )
+      return parseAcpLoginStatus(result)
+    } catch (error) {
+      return { ok: false, login_id: cleanId, phase: 'error', needs_code: false, error: desktopError(error) }
+    }
+  }
+
+  async cancelAcpLogin(loginId: string): Promise<void> {
+    const cleanId = loginId.trim()
+    if (!cleanId) return
+    await this.bridge.call(
+      'acp.login',
+      this.swarmParams({ action: 'cancel', login_id: cleanId }),
+    ).catch(() => undefined)
   }
 
   /**
@@ -7445,6 +7553,14 @@ export class Store {
         else if (current.compacting && payload.turn_count !== undefined) patch.compacting = undefined
         if (payload.kind === 'network_retry') patch.networkRetrying = true
         if (payload.kind === 'provider_ready') patch.networkRetrying = false
+        if (payload.kind === 'plan') {
+          const planTodos = todoItemsOf(payload.todos)
+          if (planTodos !== null) patch.todos = planTodos
+        }
+        if (payload.kind === 'focus') {
+          const focus = str(payload.text).trim()
+          patch.liveFocus = focus || null
+        }
         if (typeof payload.model === 'string' && payload.model) patch.model = payload.model
         if (typeof payload.context_tokens === 'number') patch.contextTokens = payload.context_tokens
         if (typeof payload.max_context === 'number') {
@@ -7711,6 +7827,7 @@ export class Store {
           : this.frame.turnSeconds
         this.patch({
           turnActive: false,
+          liveFocus: null,
           turnSeconds: elapsedSeconds,
           turnStartedAt: null,
           turnFailed: this.failure !== null,
@@ -7927,6 +8044,7 @@ export class Store {
       log: this.logView,
       plan: null,
       todos: null,
+      liveFocus: null,
       failed: null,
       turnCount: 0,
       turnFailed: false,
@@ -7984,6 +8102,7 @@ export class Store {
       : now
     this.patch({
       turnActive: true, networkRetrying: false,
+      liveFocus: null,
       turnFailed: false,
       turnSeconds: Math.max(0, Math.floor((now - anchor) / 1000)),
       turnStartedAt: anchor,

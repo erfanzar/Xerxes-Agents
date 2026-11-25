@@ -306,6 +306,7 @@ export type AcpBridgeStreamEvent =
     readonly type: 'tool_result'
   }
   | { readonly entries: readonly AcpPlanEntry[]; readonly type: 'plan' }
+  | { readonly focus: string; readonly type: 'focus' }
   | { readonly modeId: string; readonly modeName?: string; readonly type: 'mode_update' }
   | { readonly modelId: string; readonly modelName?: string; readonly type: 'model_update' }
   | {
@@ -1013,6 +1014,8 @@ export function bridgeEventFromAcpClientEvent(
     }
     case 'plan':
       return { type: 'plan', entries: event.entries }
+    case 'focus':
+      return { type: 'focus', focus: event.focus }
     case 'mode_update':
       return {
         type: 'mode_update',

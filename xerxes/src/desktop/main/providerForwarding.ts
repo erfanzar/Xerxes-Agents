@@ -297,16 +297,39 @@ export class DesktopProviderForwarding {
     let listed: Record<string, unknown>
     try { listed = await this.remote('provider_list', { with_readiness: true }) } catch { return false }
     if (listed.ok !== true || listed.readiness_supported !== true || !Array.isArray(listed.profiles)) return false
-    const row = listed.profiles.map(record).find(value => value.name === primary.name && value.signs_in === true && value.ready === true)
-    if (!row) return false
+    const profiles = listed.profiles.map(record)
+    // Prefer an exact profile-name match; if the user transferred a named OAuth
+    // account of the same sign-in provider (e.g. `claude-Work` when local active
+    // is `claude-code`), adopt that host-ready transferred account instead of
+    // forcing traffic through `via this Mac`.
+    let row = profiles.find(value => value.name === primary.name && value.signs_in === true && value.ready === true)
+    if (!row) {
+      const sameName = profiles.find(value => value.name === primary.name)
+      const inferredProvider =
+        (typeof sameName?.provider === 'string' && sameName.provider.trim().toLowerCase())
+        || (primary.name === 'codex' || primary.name.startsWith('codex-') ? 'openai-codex' : '')
+        || (primary.name === 'claude-code' || primary.name.startsWith('claude-') ? 'claude-code' : '')
+      if (inferredProvider) {
+        const candidates = profiles.filter(
+          value =>
+            typeof value.provider === 'string'
+            && value.provider.trim().toLowerCase() === inferredProvider
+            && value.signs_in === true
+            && value.ready === true,
+        )
+        row = candidates.find(value => value.active === true) ?? candidates[0]
+      }
+    }
+    if (!row || typeof row.name !== 'string' || !row.name) return false
+    const resolvedProfile = row.name
     const model = primary.model || (typeof row.model === 'string' ? row.model : '')
     if (!model) return false
     try {
-      const set = await this.remote('set_model', { model, provider_profile: primary.name, session_key: sessionKey, ...(fromRelay ? { host_credentials: true } : {}) })
+      const set = await this.remote('set_model', { model, provider_profile: resolvedProfile, session_key: sessionKey, ...(fromRelay ? { host_credentials: true } : {}) })
       // An older host ignores host_credentials and would keep the relayed route.
       if (set.ok !== true || (fromRelay && set.host_credentials !== true)) return false
     } catch { return false }
-    this.hostOwn.set(sessionKey, { profile: primary.name, model })
+    this.hostOwn.set(sessionKey, { profile: resolvedProfile, model })
     while (this.hostOwn.size > MAX_ACTIVITY) this.hostOwn.delete(this.hostOwn.keys().next().value!)
     this.changed?.()
     return true

@@ -1536,3 +1536,33 @@ test('the composer shows the Agents chip beside Plan, auto by default', () => {
   expect(html.indexOf('>Plan<')).toBeLessThan(html.indexOf('Agents · Auto'))
   expect(render(snapshot({ currentId: 'c1', currentTitle: 'T', delegationMode: 'eager' }))).toContain('Agents · Eager')
 })
+
+test('composer renders expandable steps checklist with remaining count and live focus status', () => {
+  const html = render(snapshot({
+    turnActive: true,
+    liveFocus: 'Inspecting Antigravity steps bridge',
+    todos: [
+      { id: 'plan-1', content: 'Audit daemon', status: 'completed' },
+      { id: 'plan-2', content: 'Wire live focus', status: 'in_progress' },
+      { id: 'plan-3', content: 'Verify release', status: 'pending' },
+    ] as unknown as Snapshot['todos'],
+  }))
+  expect(html).toContain('Inspecting Antigravity steps bridge')
+  expect(html).toContain('2 left · 1/3')
+  expect(html).toContain('aria-label="Steps"')
+  expect(html).toContain('aria-label="Hide steps"')
+  expect(html).toContain('Audit daemon')
+  expect(html).toContain('Wire live focus')
+  expect(html).toContain('Verify release')
+
+  const doneHtml = render(snapshot({
+    todos: [
+      { id: 'plan-1', content: 'Audit daemon', status: 'completed' },
+      { id: 'plan-2', content: 'Wire live focus', status: 'completed' },
+    ] as unknown as Snapshot['todos'],
+  }))
+  expect(doneHtml).toContain('All tasks completed')
+  expect(doneHtml).toContain('>2/2<')
+  expect(doneHtml).toContain('aria-label="Show steps"')
+  expect(doneHtml).not.toContain('aria-label="Steps"')
+})

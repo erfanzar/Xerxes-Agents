@@ -873,6 +873,77 @@ function parseTranscriptSteps(raw: string): ParsedTranscriptStep[] {
   return steps
 }
 
+export interface AgyTranscriptStepItem {
+  readonly id: string
+  readonly content: string
+  readonly status: 'pending' | 'in_progress' | 'completed'
+}
+
+function normalizeTranscriptStepStatus(raw: unknown): 'pending' | 'in_progress' | 'completed' {
+  const lower = typeof raw === 'string' ? raw.trim().toLowerCase() : ''
+  if (lower === 'done' || lower === 'completed' || lower === 'finished' || lower === 'skipped') {
+    return 'completed'
+  }
+  if (lower === 'in_progress' || lower === 'in-progress' || lower === 'running' || lower === 'active') {
+    return 'in_progress'
+  }
+  return 'pending'
+}
+
+function parseJsonValueSafe(value: unknown): unknown {
+  if (typeof value !== 'string') return value
+  const trimmed = value.trim()
+  if (!trimmed) return undefined
+  try {
+    return JSON.parse(trimmed)
+  } catch {
+    return undefined
+  }
+}
+
+export function extractLatestUpdateStepsFromSteps(
+  steps: readonly ParsedTranscriptStep[],
+): readonly AgyTranscriptStepItem[] {
+  for (let i = steps.length - 1; i >= 0; i -= 1) {
+    const step = steps[i]
+    if (!step || step.type !== 'PLANNER_RESPONSE' || step.toolCalls.length === 0) continue
+    for (let j = step.toolCalls.length - 1; j >= 0; j -= 1) {
+      const tc = step.toolCalls[j]
+      if (!tc) continue
+      const normName = (tc.name.split(/[.:/]/).pop() ?? tc.name).trim().toLowerCase()
+      if (normName !== 'update_steps') continue
+      const argsObj = isRecord(tc.args)
+        ? tc.args
+        : (() => {
+            const parsed = parseJsonValueSafe(tc.args)
+            return isRecord(parsed) ? parsed : undefined
+          })()
+      if (!argsObj) continue
+      let rawSteps: unknown = argsObj.steps
+      if (typeof rawSteps === 'string') {
+        rawSteps = parseJsonValueSafe(rawSteps)
+        if (typeof rawSteps === 'string') {
+          rawSteps = parseJsonValueSafe(rawSteps)
+        }
+      }
+      if (!Array.isArray(rawSteps)) continue
+      const items: AgyTranscriptStepItem[] = []
+      for (const entry of rawSteps) {
+        if (!isRecord(entry)) continue
+        const title = readString(entry.title) ?? readString(entry.content) ?? readString(entry.text)
+        if (!title) continue
+        items.push({
+          id: `plan-${items.length + 1}`,
+          content: title,
+          status: normalizeTranscriptStepStatus(entry.status),
+        })
+      }
+      return items
+    }
+  }
+  return []
+}
+
 function analyzeTranscriptSteps(
   steps: readonly ParsedTranscriptStep[],
   memberState: SwarmMemberState,
@@ -1249,6 +1320,7 @@ export class AgyBrainBridge {
   private readonly options: AgyBrainBridgeOptions
   private readonly transcriptCache = new Map<string, CachedTranscriptEntry>()
   private readonly backgroundTasksCache = new Map<string, CachedBackgroundTasksEntry>()
+  private readonly stepsCache = new Map<string, { readonly mtimeMs: number; readonly size: number; readonly items: readonly AgyTranscriptStepItem[] }>()
   private readonly watches = new Map<string, WatchedSessionState>()
   private readonly pinnedArtifactsBySession = new Map<string, Set<string>>()
   private readonly artifactVersions = new Map<string, number>()
@@ -1698,6 +1770,39 @@ export class AgyBrainBridge {
     }
     this.backgroundTasksCache.set(cacheKey, { mtimeMs, size, taskFilesSig, tasks })
     return tasks
+  }
+
+  /**
+   * Synchronously extract the latest `update_steps` checklist recorded in an
+   * Antigravity session's `.system_generated/logs/transcript.jsonl`. Strictly
+   * read-only and bounded to the retained tail of the transcript log.
+   */
+  readLatestUpdateStepsSync(location: AgyBrainLocation): readonly AgyTranscriptStepItem[] {
+    const transcriptPath = join(location.logsDir, 'transcript.jsonl')
+    let mtimeMs = 0
+    let size = 0
+    try {
+      const st = statSync(transcriptPath)
+      mtimeMs = st.mtimeMs
+      size = st.size
+    } catch {
+      return []
+    }
+    if (mtimeMs <= 0 || size <= 0) return []
+    const cacheKey = location.sessionDir
+    const cached = this.stepsCache.get(cacheKey)
+    if (cached && cached.mtimeMs === mtimeMs && cached.size === size) {
+      return cached.items
+    }
+    const rawTranscript = readTailBoundedUtf8Sync(transcriptPath, MAX_BG_TRANSCRIPT_BYTES)
+    const steps = rawTranscript ? parseTranscriptSteps(rawTranscript) : []
+    const items = extractLatestUpdateStepsFromSteps(steps)
+    if (this.stepsCache.size >= 64 && !this.stepsCache.has(cacheKey)) {
+      const oldest = this.stepsCache.keys().next().value
+      if (oldest !== undefined) this.stepsCache.delete(oldest)
+    }
+    this.stepsCache.set(cacheKey, { mtimeMs, size, items })
+    return items
   }
 
   /**

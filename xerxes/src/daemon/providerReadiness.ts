@@ -13,16 +13,24 @@
 import { homedir } from 'node:os'
 import { delimiter, join } from 'node:path'
 
+import { AnthropicOAuthSession } from '../auth/anthropicOAuth.js'
 import { claudeCodeLogin, claudeExecutable } from '../auth/claudeCodeLogin.js'
 import { CODEX_REFRESH_SKEW_SECONDS, CodexSession, importCodexCliTokens } from '../auth/codexAuth.js'
+import { CredentialStorage } from '../auth/storage.js'
 import { ConfigurationError } from '../core/errors.js'
+
+const OAUTH_ACCOUNT_ID = /^[a-f0-9-]{36}$/
 
 export type SignInReadinessState = 'ready' | 'not_signed_in' | 'not_installed' | 'unknown'
 export interface SignInReadiness {
   readonly state: SignInReadinessState
   readonly reason?: string
 }
-export type SignInReadinessProbe = (provider: string) => Promise<SignInReadiness>
+export interface SignInReadinessTarget {
+  readonly oauthAccountId?: string
+  readonly isolatedAuth?: boolean
+}
+export type SignInReadinessProbe = (provider: string, target?: SignInReadinessTarget) => Promise<SignInReadiness>
 
 export interface SignInReadinessDeps {
   readonly environment?: Readonly<Record<string, string | undefined>>
@@ -33,6 +41,8 @@ export interface SignInReadinessDeps {
   readonly codexSession?: Pick<CodexSession, 'stored'>
   readonly codexCliTokens?: typeof importCodexCliTokens
   readonly homeDirectory?: string
+  /** Override `<xerxes home>/provider-accounts` root (deterministic tests). */
+  readonly accountsRoot?: string
   readonly now?: () => number
   /** A keychain read can prompt; one answer serves this long. */
   readonly cacheMs?: number
@@ -52,14 +62,42 @@ export function createSignInReadinessProbe(deps: SignInReadinessDeps = {}): Sign
   const login = deps.login ?? (env => claudeCodeLogin({ environment: env }))
   const codexInstalled = deps.codexExecutable ?? codexExecutable
   const homeDirectory = deps.homeDirectory ?? (environment.HOME?.trim() || homedir())
+  const accountsRoot = deps.accountsRoot
+    ?? (environment.XERXES_HOME?.trim()
+      ? join(environment.XERXES_HOME.trim(), 'provider-accounts')
+      : join(homeDirectory, '.xerxes', 'provider-accounts'))
   const codexSession = deps.codexSession ?? new CodexSession({ environment, homeDirectory })
   const codexCliTokens = deps.codexCliTokens ?? importCodexCliTokens
   const now = deps.now ?? Date.now
   const cacheMs = deps.cacheMs ?? 30_000
   const cache = new Map<string, { readonly at: number; readonly value: Promise<SignInReadiness> }>()
-  const probe = async (provider: string): Promise<SignInReadiness> => {
+  const probe = async (provider: string, target?: SignInReadinessTarget): Promise<SignInReadiness> => {
+    const rawAccountId = target?.oauthAccountId?.trim()
+    const accountId = rawAccountId && OAUTH_ACCOUNT_ID.test(rawAccountId) ? rawAccountId : undefined
+    const isolated = target?.isolatedAuth === true || Boolean(accountId)
+    const accountDir = accountId ? join(accountsRoot, accountId) : undefined
+
     if (provider === 'openai-codex') {
       try {
+        if (isolated) {
+          if (!accountDir) {
+            return { state: 'not_signed_in', reason: 'This Codex account has no saved sign-in on this machine.' }
+          }
+          const accountCodexEnv = { CODEX_HOME: join(accountDir, '.codex') }
+          const accountSession = new CodexSession({
+            storage: new CredentialStorage(join(accountDir, 'credentials')),
+            environment: accountCodexEnv,
+            homeDirectory: accountDir,
+          })
+          const [stored, cli] = await Promise.all([
+            accountSession.stored(),
+            importCodexCliTokens(accountCodexEnv, accountDir),
+          ])
+          if ([stored, cli].some(token => token && (token.refreshToken?.trim() || !token.isExpired(CODEX_REFRESH_SKEW_SECONDS, now() / 1000)))) {
+            return { state: 'ready' }
+          }
+          return { state: 'not_signed_in', reason: 'This Codex account is not signed in on this machine.' }
+        }
         const [stored, cli] = await Promise.all([codexSession.stored(), codexCliTokens(environment, homeDirectory)])
         // The native Responses transport uses either credential source directly;
         // it does not require the Codex executable. Expired access is still
@@ -76,6 +114,26 @@ export function createSignInReadinessProbe(deps: SignInReadinessDeps = {}): Sign
     }
     if (provider !== 'claude-code') return { state: 'unknown', reason: 'This machine does not check that provider\'s sign-in.' }
     if (!executable(environment)) return { state: 'not_installed', reason: 'Claude Code is not installed on this machine.' }
+    if (isolated) {
+      if (!accountDir) {
+        return { state: 'not_signed_in', reason: 'This Claude Code account has no saved sign-in on this machine.' }
+      }
+      try {
+        const storedOAuth = await new AnthropicOAuthSession({ xerxesHome: accountDir, environment: {} }).stored()
+        if (storedOAuth && (storedOAuth.access.trim() || storedOAuth.refresh.trim())) {
+          return { state: 'ready' }
+        }
+        await claudeCodeLogin({
+          environment: { ...environment, CLAUDE_CONFIG_DIR: accountDir },
+          readKeychain: async () => undefined,
+        })
+        return { state: 'ready' }
+      } catch (error) {
+        if (error instanceof ConfigurationError) return { state: 'not_signed_in', reason: 'This Claude Code account is not signed in on this machine.' }
+        if (error instanceof Error && /lapsed/i.test(error.message)) return { state: 'ready' }
+        return { state: 'unknown', reason: 'Could not read Claude Code\'s sign-in on this machine.' }
+      }
+    }
     try {
       await login(environment)
       return { state: 'ready' }
@@ -86,12 +144,15 @@ export function createSignInReadinessProbe(deps: SignInReadinessDeps = {}): Sign
       return { state: 'unknown', reason: 'Could not read Claude Code\'s sign-in on this machine.' }
     }
   }
-  return async provider => {
+  return async (provider, target) => {
     const key = provider.trim().toLowerCase()
-    const hit = cache.get(key)
+    const rawAccountId = target?.oauthAccountId?.trim()
+    const accountId = rawAccountId && OAUTH_ACCOUNT_ID.test(rawAccountId) ? rawAccountId : undefined
+    const cacheKey = `${key}:${accountId ?? (target?.isolatedAuth ? 'isolated' : 'global')}`
+    const hit = cache.get(cacheKey)
     if (hit && now() - hit.at < cacheMs) return hit.value
-    const value = probe(key)
-    cache.set(key, { at: now(), value })
+    const value = probe(key, target)
+    cache.set(cacheKey, { at: now(), value })
     return value
   }
 }

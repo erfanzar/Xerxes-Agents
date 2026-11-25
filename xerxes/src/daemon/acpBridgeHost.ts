@@ -1,6 +1,7 @@
 // Copyright 2026 The Xerxes-Agents Author @erfanzar (Erfan Zare Chavoshi).
 // Licensed under the Apache License, Version 2.0.
 
+import { randomUUID } from 'node:crypto'
 import { lstat, readFile, realpath, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
@@ -106,6 +107,13 @@ export interface DaemonAcpBridgeHostOptions {
   readonly homeDir?: string
   /** Test seam for custom binary validation. */
   readonly resolveBinary?: (command: string) => string | undefined
+  /** Test seam to override `agy acp --login` process spawning. */
+  readonly spawnLoginProcess?: (options: {
+    readonly args: readonly string[]
+    readonly command: string
+    readonly cwd: string
+    readonly env: Readonly<Record<string, string | undefined>>
+  }) => AcpSpawnedLoginProcess
   /** Optional ACP `terminal/*` client handlers; `clientCapabilities.terminal` is true only when provided. */
   readonly terminalHandlers?: AcpTerminalClientHandlers
 }
@@ -169,6 +177,32 @@ export type AcpAuthenticateResult =
       readonly ok: true
     }
   | { readonly error: string; readonly ok: false }
+
+export type AcpLoginPhase =
+  | 'starting'
+  | 'awaiting_code'
+  | 'waiting_browser'
+  | 'verifying'
+  | 'done'
+  | 'error'
+  | 'cancelled'
+
+export interface AcpLoginFlowSnapshot {
+  readonly authorization_url?: string
+  readonly error?: string
+  readonly login_id: string
+  readonly needs_code: boolean
+  readonly ok: boolean
+  readonly phase: AcpLoginPhase
+}
+
+export interface AcpSpawnedLoginProcess {
+  readonly exited: Promise<number | null>
+  readonly kill: () => void
+  readonly stderr: ReadableStream<Uint8Array>
+  readonly stdout: ReadableStream<Uint8Array>
+  readonly writeLine: (line: string) => void
+}
 
 export interface AcpListedSessionWire {
   readonly cwd?: string
@@ -330,8 +364,94 @@ function acpSideQuestionToolTarget(name: string, input: Record<string, unknown>,
 
 const MAX_ACP_TOOL_NAMES = 256
 const SESSION_CLOSE_TIMEOUT_MS = 500
+const AGY_LOGIN_TTL_MS = 5 * 60_000
+const AGY_LOGIN_START_WAIT_MS = 5_000
+const AGY_LOGIN_SUBMIT_WAIT_MS = 15_000
+const MAX_AGY_LOGIN_CODE_LENGTH = 4096
+const MAX_AGY_LOGIN_LOG_CHARS = 8192
 const ANTIGRAVITY_AUTH_ERROR =
-  'Antigravity is not signed in. Run `agy acp --login` (or `agy`) in your terminal to sign in with Google, then click Retry.'
+  'Antigravity is not signed in. Click Login with Antigravity (or run `agy acp --login`), then retry.'
+
+interface ActiveAcpLoginFlow {
+  authorizationUrl: string | undefined
+  codeSubmitted: boolean
+  error: string | undefined
+  readonly id: string
+  needsCode: boolean
+  outputTail: string
+  phase: AcpLoginPhase
+  readonly process: AcpSpawnedLoginProcess
+  readonly readyWaiters: Set<() => void>
+  readonly timeout: ReturnType<typeof setTimeout>
+}
+
+function extractAntigravityAuthUrl(text: string): string | undefined {
+  const matches = text.match(/https:\/\/accounts\.google\.com\/[^\s"'<>]+/gi)
+  if (!matches) return undefined
+  for (const raw of matches) {
+    const cleaned = raw.replace(/[),.;]+$/, '')
+    try {
+      const parsed = new URL(cleaned)
+      if (parsed.protocol === 'https:' && parsed.hostname.toLowerCase() === 'accounts.google.com') {
+        return parsed.href
+      }
+    } catch {
+      continue
+    }
+  }
+  return undefined
+}
+
+function authUrlUsesWebCodeCallback(url: string): boolean {
+  try {
+    const parsed = new URL(url)
+    const redirectUri = parsed.searchParams.get('redirect_uri') ?? ''
+    if (!redirectUri) return false
+    const target = new URL(redirectUri)
+    return target.hostname !== 'localhost' && target.hostname !== '127.0.0.1' && target.hostname !== '[::1]'
+  } catch {
+    return false
+  }
+}
+
+function spawnBunLoginProcess(options: {
+  readonly args: readonly string[]
+  readonly command: string
+  readonly cwd: string
+  readonly env: Readonly<Record<string, string | undefined>>
+}): AcpSpawnedLoginProcess {
+  const cleanEnv: Record<string, string> = {}
+  for (const [key, value] of Object.entries(options.env)) {
+    if (typeof value === 'string') cleanEnv[key] = value
+  }
+  const proc = Bun.spawn([options.command, ...options.args], {
+    cwd: options.cwd,
+    env: cleanEnv,
+    stdin: 'pipe',
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  return {
+    stdout: proc.stdout,
+    stderr: proc.stderr,
+    exited: proc.exited,
+    writeLine: (line: string) => {
+      try {
+        proc.stdin.write(`${line}\n`)
+        void proc.stdin.flush()
+      } catch {
+        // Ignore write errors if the child already exited.
+      }
+    },
+    kill: () => {
+      try {
+        proc.kill()
+      } catch {
+        // Ignore kill errors if already terminated.
+      }
+    },
+  }
+}
 
 interface ActiveAcpSession {
   activeAbort: AbortController | undefined
@@ -361,6 +481,7 @@ interface ActiveAcpSession {
   readonly sideSessionIds: Set<string>
   readonly toolMetaById: Map<string, AcpToolMetaSnapshot>
   readonly toolNamesById: Map<string, string>
+  readonly updateFocusStatus?: ReturnType<typeof makeAntigravityUpdateFocus>
   readonly updateStepsPlans?: ReturnType<typeof makeAntigravityUpdateStepsPlans>
 }
 
@@ -392,6 +513,7 @@ type ActiveExternalSession = ActiveAcpSession | ActiveClaudeSession
 export class DaemonAcpBridgeHost {
   private readonly active = new Map<string, ActiveExternalSession>()
   private readonly lastAuthChallengeBySession = new Map<string, LastAcpAuthChallenge>()
+  private readonly loginFlows = new Map<string, ActiveAcpLoginFlow>()
   private readonly bindingListeners = new Set<(sessionId: string, binding: AcpSessionBinding) => void>()
   private readonly sessionEventListeners = new Set<(sessionId: string, event: AcpBridgeStreamEvent) => void>()
   private readonly options: DaemonAcpBridgeHostOptions
@@ -1202,6 +1324,318 @@ export class DaemonAcpBridgeHost {
     }
   }
 
+  /**
+   * Launch an interactive native `agy acp --login` flow on the daemon host.
+   * Never reads, copies, or plants OAuth tokens — `agy` itself runs Google OAuth
+   * and writes its own credentials natively on this host (local or remote SSH).
+   */
+  async startAgyLogin(options: { readonly cwd?: string; readonly agentId?: string } = {}): Promise<AcpLoginFlowSnapshot> {
+    const cwd = resolve(options.cwd?.trim() || process.cwd())
+    const { agents } = this.listAgents()
+    let agyAgent = agents.find(item => item.id === (options.agentId?.trim() || 'antigravity'))
+    if (agyAgent && !agyAgent.available && (!this.options.discoverAgents || this.options.ensureAgy)) {
+      const envOpt = this.options.env ? { environment: this.options.env } : {}
+      try {
+        await (this.options.ensureAgy ?? ensureAgyCli)({
+          ...envOpt,
+          find: () => this.resolveCommandBinary('agy'),
+        })
+        agyAgent = this.listAgents().agents.find(item => item.id === agyAgent!.id) ?? agyAgent
+      } catch (error) {
+        return {
+          ok: false,
+          login_id: '',
+          phase: 'error',
+          needs_code: false,
+          error: errorMessage(error),
+        }
+      }
+    }
+    const command =
+      agyAgent?.binaryPath ??
+      agyAgent?.command ??
+      this.resolveCommandBinary('agy') ??
+      ''
+    if (!command || (!this.options.spawnLoginProcess && !this.resolveCommandBinary(command))) {
+      return {
+        ok: false,
+        login_id: '',
+        phase: 'error',
+        needs_code: false,
+        error: 'Antigravity CLI (`agy`) is not installed or unavailable on PATH.',
+      }
+    }
+
+    // Cancel any earlier unfinished login flow so orphan processes never accumulate.
+    for (const existingId of [...this.loginFlows.keys()]) {
+      this.cancelAgyLogin(existingId)
+    }
+
+    const transferredAgyEnv = await loadAgyRuntimeEnv(this.options.homeDir ?? homedir())
+    const rawEnv = buildAgySubprocessEnv(
+      this.options.env
+        ? { ...transferredAgyEnv, ...this.options.env }
+        : { ...process.env, ...transferredAgyEnv },
+    )
+    // On Linux/headless or SSH sessions, omit DISPLAY/WAYLAND_DISPLAY so `agy acp --login`
+    // prints the Google sign-in link cleanly and waits on stdin for the code instead of
+    // trying to invoke a nonexistent desktop browser.
+    if (process.platform !== 'darwin' || rawEnv.SSH_CONNECTION || rawEnv.SSH_TTY || rawEnv.SSH_CLIENT) {
+      rawEnv.DISPLAY = undefined
+      rawEnv.WAYLAND_DISPLAY = undefined
+      rawEnv.BROWSER = undefined
+    }
+
+    const baseArgs = agyAgent?.args?.length ? [...agyAgent.args] : ['acp']
+    const args = baseArgs.includes('--login') ? baseArgs : [...baseArgs, '--login']
+    const spawnImpl = this.options.spawnLoginProcess ?? spawnBunLoginProcess
+    let child: AcpSpawnedLoginProcess
+    try {
+      child = spawnImpl({ command, args, cwd, env: rawEnv })
+    } catch (error) {
+      return {
+        ok: false,
+        login_id: '',
+        phase: 'error',
+        needs_code: false,
+        error: `Could not start Antigravity sign-in: ${errorMessage(error)}`,
+      }
+    }
+
+    const id = randomUUID()
+    const flow: ActiveAcpLoginFlow = {
+      id,
+      process: child,
+      phase: 'starting',
+      authorizationUrl: undefined,
+      needsCode: false,
+      codeSubmitted: false,
+      outputTail: '',
+      error: undefined,
+      readyWaiters: new Set(),
+      timeout: setTimeout(() => {
+        if (flow.phase === 'done' || flow.phase === 'error' || flow.phase === 'cancelled') return
+        flow.phase = 'error'
+        flow.error = 'Antigravity sign-in timed out after 5 minutes. Start sign-in again.'
+        flow.process.kill()
+        this.notifyLoginFlowWaiters(flow)
+      }, AGY_LOGIN_TTL_MS),
+    }
+    if (typeof flow.timeout.unref === 'function') {
+      flow.timeout.unref()
+    }
+    this.loginFlows.set(id, flow)
+
+    const consumeStream = async (stream: ReadableStream<Uint8Array>): Promise<void> => {
+      const reader = stream.getReader()
+      const decoder = new TextDecoder()
+      try {
+        while (true) {
+          const { value, done } = await reader.read()
+          if (done) break
+          if (!value || value.byteLength === 0) continue
+          const chunk = decoder.decode(value, { stream: true })
+          flow.outputTail = `${flow.outputTail}${chunk}`.slice(-MAX_AGY_LOGIN_LOG_CHARS)
+          if (!flow.authorizationUrl) {
+            const url = extractAntigravityAuthUrl(flow.outputTail)
+            if (url) {
+              flow.authorizationUrl = url
+              if (authUrlUsesWebCodeCallback(url)) {
+                flow.needsCode = true
+              }
+            }
+          }
+          if (/paste the authorization code|press enter/i.test(flow.outputTail)) {
+            flow.needsCode = true
+          }
+          if (
+            flow.authorizationUrl &&
+            (flow.phase === 'starting' || flow.phase === 'waiting_browser')
+          ) {
+            flow.phase = flow.needsCode ? 'awaiting_code' : 'waiting_browser'
+            this.notifyLoginFlowWaiters(flow)
+          }
+        }
+      } catch {
+        // Ignore stream close errors on process termination.
+      } finally {
+        try {
+          reader.releaseLock()
+        } catch {
+          // Ignore release failures.
+        }
+      }
+    }
+
+    void consumeStream(child.stdout)
+    void consumeStream(child.stderr)
+    void child.exited.then(
+      code => {
+        clearTimeout(flow.timeout)
+        if (flow.phase === 'cancelled') {
+          this.notifyLoginFlowWaiters(flow)
+          return
+        }
+        if (code === 0) {
+          flow.phase = 'done'
+          flow.error = undefined
+        } else if (flow.phase !== 'error') {
+          const detailLine = flow.outputTail
+            .split(/\r?\n/)
+            .map(line => line.trim())
+            .filter(line => line && !line.startsWith('https://accounts.google.com/'))
+            .at(-1)
+          flow.phase = 'error'
+          flow.error = detailLine
+            ? `Antigravity sign-in failed: ${detailLine.slice(0, 240)}`
+            : `Antigravity sign-in exited with code ${code ?? 'unknown'}. Start sign-in again.`
+        }
+        this.notifyLoginFlowWaiters(flow)
+      },
+      error => {
+        clearTimeout(flow.timeout)
+        if (flow.phase !== 'cancelled') {
+          flow.phase = 'error'
+          flow.error = `Antigravity sign-in failed: ${errorMessage(error)}`
+        }
+        this.notifyLoginFlowWaiters(flow)
+      },
+    )
+
+    // Wait briefly so the initial response already carries `authorization_url` when ready.
+    await this.waitForLoginFlowProgress(
+      flow,
+      () =>
+        Boolean(flow.authorizationUrl) ||
+        flow.phase === 'done' ||
+        flow.phase === 'error' ||
+        flow.phase === 'cancelled',
+      AGY_LOGIN_START_WAIT_MS,
+    )
+    return this.snapshotLoginFlow(flow)
+  }
+
+  getAgyLoginStatus(loginId: string): AcpLoginFlowSnapshot {
+    const id = loginId.trim()
+    const flow = id ? this.loginFlows.get(id) : undefined
+    if (!flow) {
+      return {
+        ok: false,
+        login_id: id,
+        phase: 'error',
+        needs_code: false,
+        error: 'Antigravity sign-in session expired. Start sign-in again.',
+      }
+    }
+    return this.snapshotLoginFlow(flow)
+  }
+
+  async submitAgyLoginCode(loginId: string, rawCode: string): Promise<AcpLoginFlowSnapshot> {
+    const id = loginId.trim()
+    const flow = id ? this.loginFlows.get(id) : undefined
+    if (!flow) {
+      return {
+        ok: false,
+        login_id: id,
+        phase: 'error',
+        needs_code: false,
+        error: 'Antigravity sign-in session expired. Start sign-in again.',
+      }
+    }
+    if (flow.phase === 'done' || flow.phase === 'error' || flow.phase === 'cancelled') {
+      return this.snapshotLoginFlow(flow)
+    }
+    const code = rawCode.trim()
+    if (!code) {
+      return {
+        ...this.snapshotLoginFlow(flow),
+        ok: false,
+        error: 'Paste the authorization code or callback URL from Google.',
+      }
+    }
+    if (code.length > MAX_AGY_LOGIN_CODE_LENGTH || /[\0\r\n]/.test(code)) {
+      return {
+        ...this.snapshotLoginFlow(flow),
+        ok: false,
+        error: 'Invalid authorization code format.',
+      }
+    }
+    if (flow.codeSubmitted) {
+      return this.snapshotLoginFlow(flow)
+    }
+    flow.codeSubmitted = true
+    flow.phase = 'verifying'
+    flow.error = undefined
+    flow.process.writeLine(code)
+    await this.waitForLoginFlowProgress(
+      flow,
+      () => flow.phase === 'done' || flow.phase === 'error' || flow.phase === 'cancelled',
+      AGY_LOGIN_SUBMIT_WAIT_MS,
+    )
+    return this.snapshotLoginFlow(flow)
+  }
+
+  cancelAgyLogin(loginId: string): AcpLoginFlowSnapshot {
+    const id = loginId.trim()
+    const flow = id ? this.loginFlows.get(id) : undefined
+    if (!flow) {
+      return {
+        ok: true,
+        login_id: id,
+        phase: 'cancelled',
+        needs_code: false,
+      }
+    }
+    clearTimeout(flow.timeout)
+    if (flow.phase !== 'done') {
+      flow.phase = 'cancelled'
+      flow.process.kill()
+    }
+    this.notifyLoginFlowWaiters(flow)
+    this.loginFlows.delete(id)
+    return this.snapshotLoginFlow(flow)
+  }
+
+  private snapshotLoginFlow(flow: ActiveAcpLoginFlow): AcpLoginFlowSnapshot {
+    return {
+      ok: flow.phase !== 'error',
+      login_id: flow.id,
+      phase: flow.phase,
+      needs_code: flow.needsCode,
+      ...(flow.authorizationUrl ? { authorization_url: flow.authorizationUrl } : {}),
+      ...(flow.error ? { error: flow.error } : {}),
+    }
+  }
+
+  private notifyLoginFlowWaiters(flow: ActiveAcpLoginFlow): void {
+    for (const wake of [...flow.readyWaiters]) {
+      wake()
+    }
+  }
+
+  private waitForLoginFlowProgress(
+    flow: ActiveAcpLoginFlow,
+    predicate: () => boolean,
+    timeoutMs: number,
+  ): Promise<void> {
+    if (predicate()) return Promise.resolve()
+    return new Promise<void>(resolve => {
+      const done = () => {
+        clearTimeout(timer)
+        flow.readyWaiters.delete(onUpdate)
+        resolve()
+      }
+      const onUpdate = () => {
+        if (predicate()) done()
+      }
+      const timer = setTimeout(done, timeoutMs)
+      if (typeof timer.unref === 'function') {
+        timer.unref()
+      }
+      flow.readyWaiters.add(onUpdate)
+    })
+  }
+
   /** List sessions known to the connected external ACP agent (`session/list`). */
   async listExternalSessions(
     sessionId: string,
@@ -1730,6 +2164,9 @@ export class DaemonAcpBridgeHost {
   }
 
   async disposeAll(): Promise<void> {
+    for (const loginId of [...this.loginFlows.keys()]) {
+      this.cancelAgyLogin(loginId)
+    }
     const ids = [...this.active.keys()]
     await Promise.allSettled(ids.map(id => this.disconnect(id)))
   }
@@ -1798,6 +2235,7 @@ export class DaemonAcpBridgeHost {
       : this.options.env
 
     const readRepair = isAntigravity ? makeAntigravityReadRepair() : undefined
+    const updateFocusStatus = isAntigravity ? makeAntigravityUpdateFocus() : undefined
     const updateStepsPlans = isAntigravity ? makeAntigravityUpdateStepsPlans() : undefined
 
     const clientOptions: AcpStdioClientOptions = {
@@ -2057,6 +2495,7 @@ export class DaemonAcpBridgeHost {
           acpEvent.type === 'tool_call' ||
           acpEvent.type === 'tool_call_update' ||
           acpEvent.type === 'plan' ||
+          acpEvent.type === 'focus' ||
           acpEvent.type === 'notice' ||
           acpEvent.type === 'continuation')
       ) {
@@ -2192,6 +2631,7 @@ export class DaemonAcpBridgeHost {
         sideSessionIds: new Set<string>(),
         toolMetaById: new Map<string, AcpToolMetaSnapshot>(),
         toolNamesById: new Map<string, string>(),
+        ...(updateFocusStatus ? { updateFocusStatus } : {}),
         ...(updateStepsPlans ? { updateStepsPlans } : {}),
       }
       entry.binding = projectAcpBindingWithHostTurbo(entry, rawBinding)
@@ -2218,6 +2658,8 @@ export class DaemonAcpBridgeHost {
         const replayToolNames = new Map<string, string>()
         const replayToolMeta = new Map<string, AcpToolMetaSnapshot>()
         const replaySettled = new Set<string>()
+        const replayUpdateSteps = isAntigravity ? makeAntigravityUpdateStepsPlans() : undefined
+        const replayUpdateFocus = isAntigravity ? makeAntigravityUpdateFocus() : undefined
         const bridgedReplay: AcpBridgeStreamEvent[] = []
         for (const replayEvent of initialReplayEvents) {
           if (
@@ -2227,8 +2669,18 @@ export class DaemonAcpBridgeHost {
           ) {
             continue
           }
+          let normalizedReplay: AcpClientEvent | undefined = replayEvent
+          if (replayUpdateSteps) {
+            normalizedReplay = replayUpdateSteps(normalizedReplay)
+          }
+          if (normalizedReplay && replayUpdateFocus) {
+            normalizedReplay = replayUpdateFocus(normalizedReplay)
+          }
+          if (!normalizedReplay || normalizedReplay.type === 'focus') {
+            continue
+          }
           const bridged = bridgeEventFromAcpClientEvent(
-            replayEvent,
+            normalizedReplay,
             replayToolNames,
             replayToolMeta,
             replaySettled,
@@ -3262,10 +3714,52 @@ function selectNonInteractiveAgyAuthMethod(
   return undefined
 }
 
+const ANTIGRAVITY_UPDATE_STEPS_TITLES = new Set([
+  'run update_steps',
+  'running update_steps',
+  'run update_steps?',
+  'update_steps',
+  'update steps',
+])
+
+const ANTIGRAVITY_UPDATE_FOCUS_TITLES = new Set([
+  'run update_focus',
+  'running update_focus',
+  'run update_focus?',
+  'update_focus',
+  'update focus',
+])
+
+function matchesAntigravityToolTitle(
+  event: Extract<AcpClientEvent, { readonly type: 'tool_call' | 'tool_call_update' }>,
+  titles: ReadonlySet<string>,
+): boolean {
+  if (event.kind && event.kind !== 'other') return false
+  const title = event.title?.trim().toLowerCase()
+  if (title && titles.has(title)) return true
+  const name = event.name?.trim().toLowerCase()
+  return Boolean(name && titles.has(name))
+}
+
+function parseAcpRawInputRecord(rawInput: unknown): Readonly<Record<string, unknown>> | undefined {
+  if (isAcpRecord(rawInput)) return rawInput
+  if (typeof rawInput === 'string') {
+    const trimmed = rawInput.trim()
+    if (!trimmed) return undefined
+    try {
+      const parsed = JSON.parse(trimmed)
+      return isAcpRecord(parsed) ? parsed : undefined
+    } catch {
+      return undefined
+    }
+  }
+  return undefined
+}
+
 /**
- * `agy` emits its `update_steps` checklist as tool calls (`title === "Run update_steps"`)
- * rather than ACP `plan` updates. Transform them into live `plan` events and drop redundant
- * noise updates for those call IDs (matching T3 Code's `makeAntigravityUpdateStepsPlans`).
+ * `agy` emits its `update_steps` checklist as tool calls (`title === "Run update_steps"`
+ * or `"Running update_steps"` / `"update_steps"`) rather than ACP `plan` updates.
+ * Transform them into live `plan` events and drop redundant noise updates for those call IDs.
  */
 export function makeAntigravityUpdateStepsPlans() {
   const calls = new Set<string>()
@@ -3274,33 +3768,88 @@ export function makeAntigravityUpdateStepsPlans() {
       return event
     }
     const key = `${event.sessionId}\u0000${event.toolCallId}`
-    if (
-      (event.title === 'Run update_steps' || event.name === 'Run update_steps') &&
-      (!event.kind || event.kind === 'other')
-    ) {
+    if (matchesAntigravityToolTitle(event, ANTIGRAVITY_UPDATE_STEPS_TITLES)) {
       calls.add(key)
     }
     if (!calls.has(key)) return event
     if (event.status === 'completed' || event.status === 'failed') {
       calls.delete(key)
     }
-    if (!isAcpRecord(event.rawInput) || !Array.isArray(event.rawInput.steps)) {
+    const inputRecord = parseAcpRawInputRecord(event.rawInput)
+    let rawSteps: unknown = inputRecord?.steps
+    if (typeof rawSteps === 'string') {
+      try {
+        rawSteps = JSON.parse(rawSteps)
+      } catch {
+        rawSteps = undefined
+      }
+    }
+    if (!Array.isArray(rawSteps)) {
       return undefined
     }
     const entries: Array<{ readonly content: string; readonly priority?: string; readonly status?: string }> = []
-    for (const step of event.rawInput.steps) {
-      if (!isAcpRecord(step) || typeof step.title !== 'string' || !step.title.trim()) continue
+    for (const step of rawSteps) {
+      if (!isAcpRecord(step)) continue
+      const rawTitle =
+        typeof step.title === 'string'
+          ? step.title
+          : typeof step.content === 'string'
+            ? step.content
+            : typeof step.text === 'string'
+              ? step.text
+              : ''
+      const content = rawTitle.trim()
+      if (!content) continue
       const rawStatus = typeof step.status === 'string' ? step.status.trim() : 'pending'
+      const lowerStatus = rawStatus.toLowerCase()
+      const normalizedStatus =
+        lowerStatus === 'done' || lowerStatus === 'completed' || lowerStatus === 'finished' || lowerStatus === 'skipped'
+          ? 'completed'
+          : lowerStatus === 'in_progress' || lowerStatus === 'in-progress' || lowerStatus === 'running' || lowerStatus === 'active'
+            ? 'in_progress'
+            : rawStatus || 'pending'
       entries.push({
-        content: step.title.trim(),
+        content,
         priority: 'medium',
-        status: rawStatus === 'done' ? 'completed' : rawStatus || 'pending',
+        status: normalizedStatus,
       })
     }
     return {
       type: 'plan',
       sessionId: event.sessionId,
       entries,
+    }
+  }
+}
+
+/**
+ * `agy` emits its live phase summary via `update_focus` tool calls (`focus: "..."`).
+ * Project those into live `focus` status events and drop the raw tool-call noise.
+ */
+export function makeAntigravityUpdateFocus() {
+  const calls = new Set<string>()
+  return (event: AcpClientEvent): AcpClientEvent | undefined => {
+    if (event.type !== 'tool_call' && event.type !== 'tool_call_update') {
+      return event
+    }
+    const key = `${event.sessionId}\u0000${event.toolCallId}`
+    if (matchesAntigravityToolTitle(event, ANTIGRAVITY_UPDATE_FOCUS_TITLES)) {
+      calls.add(key)
+    }
+    if (!calls.has(key)) return event
+    if (event.status === 'completed' || event.status === 'failed') {
+      calls.delete(key)
+    }
+    const inputRecord = parseAcpRawInputRecord(event.rawInput)
+    const rawFocus = inputRecord?.focus
+    const focus = typeof rawFocus === 'string' ? rawFocus.trim() : ''
+    if (!focus) {
+      return undefined
+    }
+    return {
+      type: 'focus',
+      sessionId: event.sessionId,
+      focus,
     }
   }
 }
@@ -3383,7 +3932,9 @@ function transformAntigravityClientEvent(
   event: AcpClientEvent,
 ): AcpClientEvent | undefined {
   const repaired = entry.readRepair ? entry.readRepair.repair(event) : event
-  return entry.updateStepsPlans ? entry.updateStepsPlans(repaired) : repaired
+  const withSteps = entry.updateStepsPlans ? entry.updateStepsPlans(repaired) : repaired
+  if (!withSteps) return undefined
+  return entry.updateFocusStatus ? entry.updateFocusStatus(withSteps) : withSteps
 }
 
 function isInsideRoot(root: string, candidate: string): boolean {

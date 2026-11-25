@@ -890,8 +890,24 @@ html,body,#root,.app.atelier{background:transparent}
 .todo__state{flex:none;color:var(--x-meta);font-size:var(--ui-small)}
 .todo--cur .todo__state{color:var(--x-working)}
 .composer-task-summary{width:100%;margin:0;padding:10px 16px;box-sizing:border-box;border:0;border-bottom:1px solid var(--x-hairline);border-radius:0;background:var(--mac-control);font:var(--ui-font)/1.5 var(--sans)}
-.composer-task-summary>button{display:grid;grid-template-columns:40px minmax(0,1fr) auto;gap:10px;align-items:baseline;width:100%;border:0;background:transparent;padding:6px 2px;text-align:left;color:var(--x-secondary);cursor:pointer}
-.composer-task-summary>button:hover{color:var(--x-title)}
+.composer-task-summary>button,.composer-task-summary__main{display:grid;grid-template-columns:40px minmax(0,1fr) auto;gap:10px;align-items:baseline;width:100%;border:0;background:transparent;padding:6px 2px;text-align:left;color:var(--x-secondary);cursor:pointer}
+.composer-task-summary>button:hover,.composer-task-summary__main:hover{color:var(--x-title)}
+.composer-task-summary__todos{display:flex;flex-direction:column}
+.composer-task-summary>button+.composer-task-summary__todos,.composer-task-summary__todos+.composer-queue{margin-top:4px;border-top:1px solid var(--x-hairline)}
+.composer-task-summary__row{display:flex;align-items:center;gap:4px}
+.composer-task-summary__row>.composer-task-summary__main{flex:1;min-width:0}
+.composer-task-summary__toggle{flex:none;display:grid;place-items:center;width:24px;height:24px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--x-meta);cursor:pointer;transition:background-color 110ms ease,color 110ms ease}
+.composer-task-summary__toggle:hover{background:var(--x-selected);color:var(--x-title)}
+.composer-task-summary__toggle svg{transition:transform 140ms ease}
+.composer-task-summary__toggle.is-open svg{transform:rotate(180deg)}
+.composer-task-summary__steps{display:grid;gap:2px;margin:2px 0 4px;padding:6px 2px 2px;border-top:1px solid color-mix(in srgb,var(--x-title) 7%,transparent);list-style:none;max-height:152px;overflow-y:auto;overscroll-behavior:contain}
+.composer-task-summary__steps li{display:grid;grid-template-columns:18px minmax(0,1fr);gap:8px;align-items:start;padding:2px 0;font:400 calc(var(--ui-font) - 0.5px)/1.4 var(--sans);color:var(--x-prose)}
+.composer-task-summary__mark{display:inline-flex;align-items:center;justify-content:center;width:13px;height:13px;margin-top:2px;justify-self:center;border:1.5px solid color-mix(in srgb,var(--x-meta) 75%,transparent);border-radius:50%;box-sizing:border-box;color:var(--x-on-accent,#fff)}
+.composer-task-summary__steps li[data-state='completed'] .composer-task-summary__mark{background:var(--x-done);border-color:transparent}
+.composer-task-summary__steps li[data-state='completed'] .composer-task-summary__step-text{color:var(--x-meta);text-decoration:line-through;text-decoration-color:color-mix(in srgb,var(--x-meta) 55%,transparent)}
+.composer-task-summary__steps li[data-state='in_progress'] .composer-task-summary__mark{width:16px;height:16px;margin-top:0;border:0;color:var(--x-accent)}
+.composer-task-summary__steps li[data-state='in_progress'] .composer-task-summary__step-text{color:var(--x-title);font-weight:500}
+.composer-task-summary__step-text{min-width:0;overflow-wrap:anywhere}
 .composer-task-summary__label,.composer-task-summary__status{color:var(--x-meta);font-size:var(--ui-small)}
 .composer-task-summary__text{min-width:0;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow-wrap:anywhere}
 .composer-task-summary__status{white-space:nowrap}
@@ -2700,8 +2716,8 @@ html,body,#root,.app.atelier{background:transparent}
 /* The Goal / To-dos summary above the composer: a rounded card like the
    repository line under it. */
 .atelier .composer-task-summary{border:0!important;border-radius:12px;overflow:hidden;background:color-mix(in srgb,var(--x-title) 6%,var(--x-card))!important}
-.atelier .composer-task-summary>button{border-radius:0;background:transparent}
-.atelier .composer-task-summary>button+button{border-top:1px solid color-mix(in srgb,var(--x-title) 7%,transparent)}
+.atelier .composer-task-summary>button,.atelier .composer-task-summary__main{border-radius:0;background:transparent}
+.atelier .composer-task-summary>button+button,.atelier .composer-task-summary>button+.composer-task-summary__todos{border-top:1px solid color-mix(in srgb,var(--x-title) 7%,transparent)}
 
 /* The window buttons end at 74 screen px whatever the UI scale. */
 :root[data-layout='claude'] .atelier .side__head{padding-left:calc(84px / var(--ui-zoom,1))}

@@ -200,6 +200,7 @@ export type AcpClientEvent =
     readonly type: 'tool_call_update'
   }
   | { readonly entries: readonly AcpPlanEntry[]; readonly sessionId: string; readonly type: 'plan' }
+  | { readonly focus: string; readonly sessionId: string; readonly type: 'focus' }
   | {
     readonly modeId: string
     readonly modeName?: string

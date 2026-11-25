@@ -504,7 +504,7 @@ describe('Antigravity ACP client & event normalization (Fixes 3, 6, 9, 10, 11, 1
     expect(authFail.ok).toBe(false)
     if (!authFail.ok) {
       expect(authFail.error).toBe(
-        'Antigravity is not signed in. Run `agy acp --login` (or `agy`) in your terminal to sign in with Google, then click Retry.',
+        'Antigravity is not signed in. Click Login with Antigravity (or run `agy acp --login`), then retry.',
       )
       expect(authFail.install_hint).toBeUndefined()
     }

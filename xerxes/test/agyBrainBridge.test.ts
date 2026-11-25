@@ -11,7 +11,11 @@ import { join } from 'node:path'
 
 import { AcpStdioClient, type AcpSpawnedProcess } from '../src/acp/client.js'
 import type { AcpExternalAgentInfo } from '../src/acp/externalAgents.js'
-import { DaemonAcpBridgeHost } from '../src/daemon/acpBridgeHost.js'
+import {
+  DaemonAcpBridgeHost,
+  makeAntigravityUpdateFocus,
+  makeAntigravityUpdateStepsPlans,
+} from '../src/daemon/acpBridgeHost.js'
 import {
   AgyBrainBridge,
   artifactIdForAgyPath,
@@ -1929,5 +1933,218 @@ describe('DaemonServer — Antigravity Swarm, Artifacts, Subagents, Offline Read
       async () => ({ ok: false }),
     )
     expect(workspacePng.ok).toBe(false)
+  })
+
+  test('DaemonAcpBridgeHost drives native agy acp --login without copying credentials (start, code submit, error, cancel)', async () => {
+    const writtenLines: string[] = []
+    let killed = false
+    let resolveExit!: (code: number | null) => void
+    let spawnedArgs: readonly string[] = []
+    let spawnedEnv: Readonly<Record<string, string | undefined>> = {}
+
+    const host = new DaemonAcpBridgeHost({
+      env: {
+        HOME: '/tmp/agy-login-home',
+        SSH_CONNECTION: '10.0.0.1 55555 10.0.0.2 22',
+        DISPLAY: ':0',
+        XERXES_DAEMON_BUILD_ID: 'secret-daemon',
+      },
+      discoverAgents: () => [
+        {
+          id: 'antigravity',
+          name: 'Antigravity',
+          provider: 'antigravity',
+          transport: 'acp',
+          available: true,
+          command: '/usr/local/bin/agy',
+          binaryPath: '/usr/local/bin/agy',
+          args: ['acp'],
+          description: 'Antigravity CLI',
+        },
+      ],
+      spawnLoginProcess: ({ args, env }) => {
+        spawnedArgs = args
+        spawnedEnv = env
+        let outCtrl!: ReadableStreamDefaultController<Uint8Array>
+        const stdout = new ReadableStream<Uint8Array>({
+          start(controller) {
+            outCtrl = controller
+            controller.enqueue(
+              encoder.encode(
+                'Open this link in a browser to log in with Google:\n\n'
+                + '  https://accounts.google.com/o/oauth2/auth?client_id=test&redirect_uri=https%3A%2F%2Fantigravity.google%2Foauth-callback&state=abc\n\n'
+                + 'Then paste the authorization code, or the full URL of the page you land on, and press Enter:\n',
+              ),
+            )
+          },
+        })
+        const stderr = new ReadableStream<Uint8Array>({ start(controller) { controller.close() } })
+        const exited = new Promise<number | null>(resolve => {
+          resolveExit = resolve
+        })
+        return {
+          stdout,
+          stderr,
+          exited,
+          writeLine: line => {
+            writtenLines.push(line)
+            try { outCtrl.close() } catch { /* ignore */ }
+            resolveExit(0)
+          },
+          kill: () => {
+            killed = true
+            try { outCtrl.close() } catch { /* ignore */ }
+            resolveExit(143)
+          },
+        }
+      },
+    })
+
+    const started = await host.startAgyLogin({ cwd: '/tmp' })
+    expect(started.ok).toBe(true)
+    expect(started.phase).toBe('awaiting_code')
+    expect(started.needs_code).toBe(true)
+    expect(started.authorization_url).toStartWith('https://accounts.google.com/o/oauth2/auth?')
+    expect(spawnedArgs).toEqual(['acp', '--login'])
+    expect(spawnedEnv.DISPLAY).toBeUndefined()
+    expect(spawnedEnv.XERXES_DAEMON_BUILD_ID).toBeUndefined()
+
+    // Rejects blank / newline-injected codes cleanly without writing to stdin
+    const badCode = await host.submitAgyLoginCode(started.login_id, 'abc\ndef')
+    expect(badCode.ok).toBe(false)
+    expect(writtenLines).toEqual([])
+
+    const completed = await host.submitAgyLoginCode(started.login_id, '4/0A-test-auth-code')
+    expect(completed.ok).toBe(true)
+    expect(completed.phase).toBe('done')
+    expect(writtenLines).toEqual(['4/0A-test-auth-code'])
+
+    // Cancel path kills an active login child process cleanly
+    killed = false
+    const second = await host.startAgyLogin({ cwd: '/tmp' })
+    expect(second.phase).toBe('awaiting_code')
+    const cancelled = host.cancelAgyLogin(second.login_id)
+    expect(cancelled.phase).toBe('cancelled')
+    expect(killed).toBe(true)
+  })
+
+  test('Antigravity update_steps variants, update_focus live status, and brain transcript fallback work end-to-end', async () => {
+    const updateSteps = makeAntigravityUpdateStepsPlans()
+    expect(
+      updateSteps({
+        type: 'tool_call',
+        sessionId: 's1',
+        toolCallId: 'tc-str',
+        name: 'Running update_steps',
+        title: 'Running update_steps',
+        kind: 'other',
+        rawInput: {
+          steps: JSON.stringify([
+            { title: 'Inspect codebase', status: 'done' },
+            { title: 'Skip old path', status: 'skipped' },
+            { title: 'Patch bridge', status: 'in_progress' },
+            { title: 'Ship release', status: 'pending' },
+          ]),
+        },
+      }),
+    ).toEqual({
+      type: 'plan',
+      sessionId: 's1',
+      entries: [
+        { content: 'Inspect codebase', priority: 'medium', status: 'completed' },
+        { content: 'Skip old path', priority: 'medium', status: 'completed' },
+        { content: 'Patch bridge', priority: 'medium', status: 'in_progress' },
+        { content: 'Ship release', priority: 'medium', status: 'pending' },
+      ],
+    })
+    expect(
+      updateSteps({
+        type: 'tool_call_update',
+        sessionId: 's1',
+        toolCallId: 'tc-str',
+        status: 'completed',
+      }),
+    ).toBeUndefined()
+
+    const updateFocus = makeAntigravityUpdateFocus()
+    expect(
+      updateFocus({
+        type: 'tool_call',
+        sessionId: 's1',
+        toolCallId: 'tc-focus',
+        name: 'Run update_focus',
+        title: 'Run update_focus',
+        kind: 'other',
+        rawInput: { focus: 'Inspecting remote SSH readiness' },
+      }),
+    ).toEqual({
+      type: 'focus',
+      sessionId: 's1',
+      focus: 'Inspecting remote SSH readiness',
+    })
+    expect(
+      updateFocus({
+        type: 'tool_call_update',
+        sessionId: 's1',
+        toolCallId: 'tc-focus',
+        status: 'completed',
+      }),
+    ).toBeUndefined()
+
+    // Brain transcript read-only fallback extracts the latest update_steps call
+    const tmp = await makeTempDir()
+    const home = join(tmp, 'home')
+    const extId = 'a1b2c3d4-1111-2222-3333-444455556666'
+    const seeded = await seedMockAgyBrain(home, extId)
+    const logsDir = join(seeded.sessionDir, '.system_generated', 'logs')
+    await mkdir(logsDir, { recursive: true })
+    await writeFile(
+      join(logsDir, 'transcript.jsonl'),
+      [
+        JSON.stringify({
+          step_index: 1,
+          source: 'MODEL',
+          type: 'PLANNER_RESPONSE',
+          status: 'DONE',
+          tool_calls: [
+            {
+              name: 'update_steps',
+              args: {
+                steps: JSON.stringify([
+                  { title: 'Old step', status: 'in_progress' },
+                ]),
+              },
+            },
+          ],
+        }),
+        JSON.stringify({
+          step_index: 5,
+          source: 'MODEL',
+          type: 'PLANNER_RESPONSE',
+          status: 'DONE',
+          tool_calls: [
+            {
+              name: 'update_steps',
+              args: {
+                steps: JSON.stringify([
+                  { title: 'Inspect codebase', status: 'done' },
+                  { title: 'Wire steps UI', status: 'in_progress' },
+                  { title: 'Verify build', status: 'pending' },
+                ]),
+              },
+            },
+          ],
+        }),
+      ].join('\n') + '\n',
+      'utf8',
+    )
+    const bridge = new AgyBrainBridge({ homeDir: home })
+    const location = bridge.resolveLocation({ externalSessionId: extId })
+    expect(location).toBeDefined()
+    expect(bridge.readLatestUpdateStepsSync(location!)).toEqual([
+      { id: 'plan-1', content: 'Inspect codebase', status: 'completed' },
+      { id: 'plan-2', content: 'Wire steps UI', status: 'in_progress' },
+      { id: 'plan-3', content: 'Verify build', status: 'pending' },
+    ])
   })
 })
