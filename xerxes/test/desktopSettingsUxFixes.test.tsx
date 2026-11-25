@@ -409,12 +409,13 @@ describe('Desktop Settings, Dialogs & Copy UX fixes', () => {
     expect(unsupportedHtml).toMatch(/<button[^>]*class="xpill"[^>]*disabled=""[^>]*>[\s\S]*?Model/)
   })
 
-  test('Fix 8: Command Palette displays accurate ⌥⌘N shortcut hint for New task wizard (not ⇧⌘N)', () => {
+  test('Fix 8: Command Palette displays accurate New task wizard shortcut hint (not New window)', () => {
     const html = renderToStaticMarkup(createElement(CommandPalette, { snap: makeSnapshot({ paletteOpen: true }) }))
-    expect(html).toContain('New task…<span class="prow__kbd">⌥⌘N</span>')
-    expect(html).not.toContain('New task…<span class="prow__kbd">⇧⌘N</span>')
-    expect(html).toContain('New blank task<span class="prow__kbd">⌘N</span>')
-    expect(html).toContain('Settings…<span class="prow__kbd">⌘,</span>')
+    const mac = process.platform === 'darwin'
+    expect(html).toContain(`New task…<span class="prow__kbd">${mac ? '⌥⌘N' : 'Ctrl+Alt+N'}</span>`)
+    expect(html).not.toContain(`New task…<span class="prow__kbd">${mac ? '⇧⌘N' : 'Ctrl+Shift+N'}</span>`)
+    expect(html).toContain(`New blank task<span class="prow__kbd">${mac ? '⌘N' : 'Ctrl+N'}</span>`)
+    expect(html).toContain(`Settings…<span class="prow__kbd">${mac ? '⌘,' : 'Ctrl+,'}</span>`)
   })
 
   test('Fix 9: Destructive & bulk actions use inline two-step confirmation without blocking window.confirm', () => {

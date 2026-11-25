@@ -140,22 +140,23 @@ test('the split counts tokens by where they ran and never invents a price', () =
 })
 
 test('Hybrid shows the split in the composer and the full breakdown in Usage', () => {
+  const here = process.platform === 'darwin' ? 'this Mac' : 'this computer'
   const task = { models: hybridTask.models!, advisor: hybridTask.advisor! }
   const chip = renderToStaticMarkup(createElement(ModelSplitChipView, { task, hybrid: true, onOpen: () => {} }))
-  expect(chip).toContain('97% on this Mac')
+  expect(chip).toContain(`97% on ${here}`)
   expect(chip).toContain('data-where="local"')
   expect(chip).toContain('data-where="cloud"')
   expect(chip).toContain('Advisor · claude-code/default (cloud)')
 
   const panel = renderToStaticMarkup(createElement(TaskModelsView, { task, hybrid: true }))
-  for (const words of ['This task', 'On this Mac <b>97%</b>', 'Cloud <b>3%</b>', 'included in plan', 'Advisor calls', 'Sent to the advisor', '14 KB', '5 calls · $1.00']) {
+  for (const words of ['This task', `On ${here} <b>97%</b>`, 'Cloud <b>3%</b>', 'included in plan', 'Advisor calls', 'Sent to the advisor', '14 KB', '5 calls · $1.00']) {
     expect(panel).toContain(words)
   }
 
   // Outside Hybrid, a task that stayed on one side shows no chip; before any call, nothing at all.
   const localOnly = { models: [hybridTask.models![0]!] }
   expect(renderToStaticMarkup(createElement(ModelSplitChipView, { task: localOnly, hybrid: false, onOpen: () => {} }))).toBe('')
-  expect(renderToStaticMarkup(createElement(ModelSplitChipView, { task: localOnly, hybrid: true, onOpen: () => {} }))).toContain('All on this Mac')
+  expect(renderToStaticMarkup(createElement(ModelSplitChipView, { task: localOnly, hybrid: true, onOpen: () => {} }))).toContain(`All on ${here}`)
   expect(renderToStaticMarkup(createElement(ModelSplitChipView, { task: { models: [] }, hybrid: true, onOpen: () => {} }))).toBe('')
   expect(renderToStaticMarkup(createElement(TaskModelsView, { task: { models: [] }, hybrid: true }))).toContain('No model calls in this task yet.')
 })
