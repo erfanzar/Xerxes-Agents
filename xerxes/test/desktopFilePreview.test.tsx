@@ -87,6 +87,7 @@ test('a Word document draws headings, emphasis, lists with their markers and tab
 test('HTML renders in an empty sandbox (no scripts), images as data URLs, and unavailable files offer the actions', () => {
   const page = render({ kind: 'html', path: 'page.html', content: '<h1>Hi</h1><script>alert(1)</script>' })
   expect(page).toContain('sandbox=""')
+  expect(page).toContain('Run interactive')
   expect(page).toContain('srcDoc="&lt;h1&gt;Hi&lt;/h1&gt;&lt;script&gt;alert(1)&lt;/script&gt;"')
   expect(page).not.toContain('allow-scripts')
   expect(page).not.toContain('<script>')

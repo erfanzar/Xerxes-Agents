@@ -10,7 +10,7 @@
 import { memo, useEffect, useRef, useState, type ReactElement } from 'react'
 import { Icon, type IconName } from './Icon.js'
 import { useDesktopNavigation } from './DesktopPanels.js'
-import { ArtifactWidgetEmbed } from './WidgetFrame.js'
+import { ArtifactWidgetEmbed, decodeHtmlEntities } from './WidgetFrame.js'
 import type { Block, ToolItem } from './types.js'
 
 export interface ArtifactRef {
@@ -197,7 +197,7 @@ export function artifactOfTool(
     cleanStr(meta?.Title)
     || cleanStr(meta?.title)
     || cleanStr(input?.title)
-  const title = explicitTitle || humanizeArtifactTitle(filename || id.replace(/^agy:/, ''), content)
+  const title = decodeHtmlEntities(explicitTitle || humanizeArtifactTitle(filename || id.replace(/^agy:/, ''), content))
   const isEdit =
     AGY_EDIT_TOOLS.has(tail)
     || input?.Append === true
@@ -395,7 +395,10 @@ export const ArtifactCard = memo(function ArtifactCard({ artifact }: { artifact:
           className="artifact-card__open"
           data-interactive={isInteractive || undefined}
           aria-label={`Open ${artifact.title}`}
-          onClick={() => open('docs', artifact.id)}
+          onClick={() => {
+            if (isInteractive && previewOpen) setPreviewOpen(false)
+            open('docs', artifact.id)
+          }}
         >
           <span>Open</span>
           <span className="artifact-card__arrow" aria-hidden="true">→</span>
@@ -408,6 +411,7 @@ export const ArtifactCard = memo(function ArtifactCard({ artifact }: { artifact:
           key={`${artifact.id}:${artifact.version}`}
           artifactId={artifact.id}
           title={artifact.title}
+          embedded
         />
       </div>
     )}

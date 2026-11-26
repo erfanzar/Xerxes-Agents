@@ -26,7 +26,7 @@ import { ChatImage } from './ImageView.js'
 import { isMacPlatform } from './runModeView.js'
 import { store } from './store.js'
 import type { SwarmStatusSnapshot } from './swarmState.js'
-import { WidgetFrame } from './WidgetFrame.js'
+import { WidgetFrame, decodeHtmlEntities } from './WidgetFrame.js'
 import type { SessionRow } from './types.js'
 
 export interface ArtifactRow {
@@ -46,7 +46,7 @@ export function artifactRowsOf(value: unknown): readonly ArtifactRow[] {
   if (!Array.isArray(value)) return []
   return value.flatMap(raw => {
     const row = record(raw)
-    const id = text(row.id), title = text(row.title)
+    const id = text(row.id), title = decodeHtmlEntities(text(row.title))
     if (!id || !title) return []
     const language = text(row.language)
     return [{

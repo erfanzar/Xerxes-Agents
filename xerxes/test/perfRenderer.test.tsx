@@ -664,6 +664,13 @@ describe('Renderer Performance — Visibility Pausing, Pollers, Backdrop & Widge
       expect(attrs.has('data-perf-paused')).toBe(false)
       expect(unpausedCount).toBe(2)
 
+      // Clicking inside an embedded iframe fires window.blur while document.hasFocus() remains true -> MUST stay unpaused!
+      ;(fakeDoc as unknown as { activeElement: { tagName: string } | null }).activeElement = { tagName: 'IFRAME' }
+      for (const fn of winListeners.get('blur') ?? []) fn()
+      expect(attrs.has('data-perf-paused')).toBe(false)
+      expect(attrs.has('data-window-unfocused')).toBe(false)
+      ;(fakeDoc as unknown as { activeElement: { tagName: string } | null }).activeElement = null
+
       // Visibility hidden -> paused!
       hidden = true
       for (const fn of docListeners.get('visibilitychange') ?? []) fn()

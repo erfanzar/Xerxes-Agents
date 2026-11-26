@@ -15,6 +15,7 @@ import { useEffect, useMemo, useState, type ReactElement, type ReactNode } from 
 import { desktopError, record, text, type RpcRecord } from './desktopRpc.js'
 import { isVscodeHost } from './host.js'
 import { isMacPlatform, localMachineLabel } from './runModeView.js'
+import { WidgetFrame } from './WidgetFrame.js'
 
 /** Kinds this renderer can draw, sent as `kinds` on every preview request. */
 export const PREVIEW_KINDS = ['table', 'image', 'pdf', 'sheet', 'document', 'html'] as const
@@ -283,8 +284,21 @@ function PdfPreview({ preview }: { preview: Extract<RichPreview, { kind: 'pdf' }
 }
 
 function HtmlPreview({ preview }: { preview: Extract<RichPreview, { kind: 'html' }> }): ReactElement {
+  const [interactive, setInteractive] = useState(false)
+  if (interactive) {
+    return <div className="file-html file-html--interactive">
+      <div className="file-html__bar">
+        <Note>Sandboxed interactive preview (offline, isolated origin).</Note>
+        <button type="button" className="btn file-html__toggle" onClick={() => setInteractive(false)}>Static preview</button>
+      </div>
+      <WidgetFrame html={preview.content} title={fileName(preview.path)} mode="panel" className="rsec__widget-frame" />
+    </div>
+  }
   return <div className="file-html">
-    <Note>Scripts, forms and web content are off in this preview.</Note>
+    <div className="file-html__bar">
+      <Note>Scripts, forms and web content are off in this preview.</Note>
+      <button type="button" className="btn file-html__toggle" onClick={() => setInteractive(true)}>Run interactive</button>
+    </div>
     {/* An empty sandbox: no scripts, forms, popups or navigation, and an opaque origin. The page's own CSP still applies, so nothing remote loads. */}
     <iframe className="file-html__frame" sandbox="" referrerPolicy="no-referrer" srcDoc={preview.content} title={`Web page: ${fileName(preview.path)}`} />
   </div>

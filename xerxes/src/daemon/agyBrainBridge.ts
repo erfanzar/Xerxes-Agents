@@ -1160,6 +1160,40 @@ function memberSignatureOf(member: SwarmMemberSnapshot): string {
   })
 }
 
+function decodeHtmlTitleEntities(raw: string): string {
+  return raw.replace(
+    /&(?:#(\d+)|#x([0-9a-fA-F]+)|quot|apos|amp|lt|gt|nbsp|mdash|ndash|rarr|larr|harr|hellip|times|middot|bull);/gi,
+    (full, dec?: string, hex?: string) => {
+      if (dec) {
+        const cp = Number.parseInt(dec, 10)
+        return Number.isFinite(cp) && cp >= 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : full
+      }
+      if (hex) {
+        const cp = Number.parseInt(hex, 16)
+        return Number.isFinite(cp) && cp >= 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : full
+      }
+      switch (full.toLowerCase()) {
+        case '&quot;': return '"'
+        case '&apos;': return "'"
+        case '&amp;': return '&'
+        case '&lt;': return '<'
+        case '&gt;': return '>'
+        case '&nbsp;': return ' '
+        case '&mdash;': return '—'
+        case '&ndash;': return '–'
+        case '&rarr;': return '→'
+        case '&larr;': return '←'
+        case '&harr;': return '↔'
+        case '&hellip;': return '…'
+        case '&times;': return '×'
+        case '&middot;': return '·'
+        case '&bull;': return '•'
+        default: return full
+      }
+    },
+  )
+}
+
 function humanizeArtifactTitle(filename: string, content: string, kind: ArtifactKind): string {
   if (kind === 'markdown') {
     for (const rawLine of content.split(/\r?\n/).slice(0, 20)) {
@@ -1173,7 +1207,7 @@ function humanizeArtifactTitle(filename: string, content: string, kind: Artifact
   } else if (kind === 'html') {
     const match = /<title[^>]*>([^<]+)<\/title>/i.exec(content.slice(0, 4096))
     if (match && match[1]?.trim()) {
-      return match[1].trim().slice(0, MAX_ARTIFACT_TITLE_CHARS)
+      return decodeHtmlTitleEntities(match[1].trim()).replace(/\s+/g, ' ').slice(0, MAX_ARTIFACT_TITLE_CHARS)
     }
   }
   const stem = filename.replace(/\.[^.]+$/, '')

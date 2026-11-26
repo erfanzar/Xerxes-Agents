@@ -699,7 +699,7 @@
 :root:not(#layout):not(#artifact-ux) .atelier .artifact-card__open[data-interactive]:hover{background:var(--x-selected);color:var(--x-title)}
 :root:not(#layout):not(#artifact-ux) .atelier .artifact-card__arrow{font-size:var(--ui-small);line-height:1;opacity:.78;transition:transform 120ms ease,opacity 120ms ease}
 :root:not(#layout):not(#artifact-ux) .atelier .artifact-card__open:hover .artifact-card__arrow{transform:translateX(1.5px);opacity:1}
-:root:not(#layout):not(#artifact-ux) .atelier .artifact-card__embed{border-top:1px solid var(--x-hairline);padding:8px 10px 10px;background:color-mix(in srgb,var(--x-sunken) 66%,transparent)}
+:root:not(#layout):not(#artifact-ux) .atelier .artifact-card__embed{border-top:1px solid var(--x-hairline);padding:0;background:var(--x-screen)}
 :root:not(#layout):not(#artifact-ux) .atelier .artifact-card__embed>*{margin:0}
 /* The new-artifact toast: compact top-right strip cleanly separated from bottom-right .notice-stack and composer. */
 :root:not(#layout):not(#artifact-ux) .atelier .artifact-toast{position:fixed;top:60px;right:20px;bottom:auto;z-index:var(--z-toast,90);display:flex;align-items:center;gap:8px;max-width:min(420px,calc(100vw - 40px));min-height:38px;padding:6px 8px 6px 11px;border:1px solid var(--x-hairline);border-radius:min(var(--r-md,10px),10px);background:var(--x-popover,var(--x-card));box-shadow:0 8px 24px rgba(0,0,0,.26)}

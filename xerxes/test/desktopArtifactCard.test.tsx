@@ -9,7 +9,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 
 import { ArtifactCard, artifactOfTool } from '../src/desktop/renderer/ArtifactCard.js'
 import { ToolCallRow } from '../src/desktop/renderer/Execution.js'
-import { ArtifactsSection, type ArtifactRow } from '../src/desktop/renderer/RailSections.js'
+import { ArtifactsSection, artifactRowsOf, type ArtifactRow } from '../src/desktop/renderer/RailSections.js'
 import type { ToolItem } from '../src/desktop/renderer/types.js'
 
 const item = (over: Partial<ToolItem>): ToolItem => ({
@@ -73,7 +73,24 @@ test('ArtifactCard parses embed:true for html artifacts and renders sleek full-w
   expect(interactiveHtml).toContain('artifact-card__preview')
   expect(interactiveHtml).toContain('aria-expanded="true"')
   expect(interactiveHtml).toContain('artifact-card__embed')
+  expect(interactiveHtml).toContain('widget-frame--embedded')
+  expect(interactiveHtml).not.toContain('Open in panel')
   expect(interactiveHtml.match(/#[0-9a-fA-F]{6}\b/g) ?? []).toEqual([])
+
+  // HTML entities from older daemons are decoded cleanly in the desktop renderer.
+  const decodedRows = artifactRowsOf([
+    {
+      id: 'agy:blueprint.html',
+      title: 'Qwen3.8-27B &mdash; 3D, Math &amp; PyTorch',
+      kind: 'html',
+      size: 140_000,
+      created_at: '2026-11-26T00:00:00Z',
+      updated_at: '2026-11-26T00:01:00Z',
+      pinned: false,
+      version: 1,
+    },
+  ])
+  expect(decodedRows[0]?.title).toBe('Qwen3.8-27B — 3D, Math & PyTorch')
 
   const css = readFileSync(join(import.meta.dir, '../src/desktop/renderer/layout.css'), 'utf8')
   expect(css).toContain('.artifact-card{display:flex;flex-direction:column;width:100%;max-width:none;')

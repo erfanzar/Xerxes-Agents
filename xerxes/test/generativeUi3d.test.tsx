@@ -242,7 +242,8 @@ test('wrapWidgetHtml injects offline CSP, theme tokens, Xerxes3D runtime, and in
   expect(bareScripts).toContain('window.__demo = 1;')
   expect(bare).toContain('<div class="x-card">Hello</div>')
 
-  // Full document in light panel mode preserves existing HTML and injects into <head> without inline height bridge.
+  // Full document in light panel mode preserves existing HTML, uses @layer xerxes-defaults
+  // without clobbering standard root font-size or height: 100%, and omits inline height bridge.
   const full = wrapWidgetHtml(
     '<!doctype html><html lang="en"><head><title>Demo</title></head><body><canvas id="c"></canvas></body></html>',
     { mode: 'panel', theme: 'light', embedId: 'panel-1' },
@@ -250,9 +251,39 @@ test('wrapWidgetHtml injects offline CSP, theme tokens, Xerxes3D runtime, and in
   expect(full).toContain('class="light"')
   expect(full).toContain('data-theme="light"')
   expect(full).toContain('<title>Demo</title>')
+  expect(full).toContain('@layer xerxes-defaults')
+  expect(full).not.toContain('font-size: 13.5px')
+  expect(full).not.toMatch(/[^-]height:\s*100%/)
   const fullScripts = decodeDataScripts(full)
   expect(fullScripts).toContain('global.Xerxes3D')
   expect(fullScripts).not.toContain('xerxes-widget-height')
+
+  // Inline HTML event attributes (onclick/oninput/onchange/javascript: href) are rewritten out of
+  // tags into externalized data: scripts so Chromium CSP3 inheritance (`script-src 'self' data:`)
+  // never blocks clicks or sliders, while bridge script installs memory storage + dynamic upgrader.
+  const interactive = wrapWidgetHtml(
+    `<button id="b" onclick="selectTab(&quot;metrics&quot;)">Metrics</button>`
+    + `<input id="r" type="range" oninput="setVal(this.value)" />`
+    + `<a id="a" href="javascript:jump(2)">Jump</a>`
+    + `<template><button onclick="fromTemplate()">Tpl</button></template>`
+    + `<script>const tpl = '<button onclick="keepInScript()">Keep</button>';</script>`,
+    { mode: 'panel', theme: 'dark', embedId: 'int-1' },
+  )
+  expect(interactive).not.toMatch(/<button id="b"[^>]*\bonclick=/i)
+  expect(interactive).not.toMatch(/<input[^>]*\boninput=/i)
+  expect(interactive).not.toMatch(/<a[^>]*href="javascript:/i)
+  expect(interactive).toContain('<template><button onclick="fromTemplate()">Tpl</button></template>')
+  expect(interactive).toContain('data-xev="e0"')
+  expect(interactive).toContain('data-xev="e1"')
+  expect(interactive).toContain('data-xev="e2"')
+  const intScripts = decodeDataScripts(interactive)
+  expect(intScripts).toContain('selectTab("metrics")')
+  expect(intScripts).toContain('setVal(this.value)')
+  expect(intScripts).toContain('jump(2)')
+  expect(intScripts).toContain('keepInScript()')
+  expect(intScripts).toContain("installMemoryStorage('localStorage')")
+  expect(intScripts).toContain('bindDynamicEl')
+  expect(intScripts).toContain('flushDynamicBindings')
 })
 
 test('WidgetFrame uses strict sandbox="allow-scripts", detects 3D badge, avoids literal hex colors, and revokes blob URLs', async () => {

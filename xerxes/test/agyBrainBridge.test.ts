@@ -462,7 +462,7 @@ async function seedMockAgyBrain(homeDir: string, extId: string): Promise<{
   )
   await writeFile(
     join(sessionDir, 'interactive_chart.html'),
-    '<!doctype html><title>Quantizer Chart</title><div>Chart</div>',
+    '<!doctype html><title>Quantizer Chart &amp; 3D &mdash; Math</title><div>Chart</div>',
     'utf8',
   )
 
@@ -672,7 +672,7 @@ describe('AgyBrainBridge — resolver, swarm projection, inspector, artifacts & 
     expect(mdArtifact?.title).toBe('Prismcore Audit Report')
     expect(mdArtifact?.kind).toBe('markdown')
     const htmlArtifact = await bridge.readArtifact('xrx-sess-1', loc, 'agy:interactive_chart.html')
-    expect(htmlArtifact?.title).toBe('Quantizer Chart')
+    expect(htmlArtifact?.title).toBe('Quantizer Chart & 3D — Math')
     expect(htmlArtifact?.kind).toBe('html')
 
     const pinned = await bridge.pinArtifact('xrx-sess-1', loc, 'agy:interactive_chart.html', true)

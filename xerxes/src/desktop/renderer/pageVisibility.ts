@@ -125,6 +125,15 @@ export function installPerfPauseListeners(
     sync()
   }
   const onBlur = (): void => {
+    // Clicking inside an embedded iframe (interactive HTML artifact, PDF preview)
+    // fires window.blur on the host document even while the app window keeps focus.
+    if (
+      doc.activeElement?.tagName === 'IFRAME'
+      && typeof doc.hasFocus === 'function'
+      && doc.hasFocus()
+    ) {
+      return
+    }
     doc.documentElement?.setAttribute?.('data-window-unfocused', '')
     sync()
   }
