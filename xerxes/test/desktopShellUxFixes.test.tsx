@@ -272,27 +272,34 @@ describe('Fix 6: QuestionCard ⌘↵ submission and valid ARIA', () => {
     expect(qSlice).toContain('handleCardKeyDown')
     expect(qSlice).toContain('if (modEnter)')
 
-    // Multi-question cards render dedicated numbered badges (never Markdown <ol> list indentation),
-    // full-width Other textareas, and a clear remaining-question status indicator in the footer.
-    const multiHtml = renderToStaticMarkup(
-      createElement(QuestionCard, {
-        plan: null,
-        question: {
-          requestId: 'q-multi',
-          items: [
-            { id: 'q1', question: 'Which commit should be exported?', options: ['Current main', 'Exact commit'], allowFreeform: true },
-            { id: 'q2', question: 'How should we handle Ray?', options: ['Stop Ray', 'Leave running'], allowFreeform: true },
-          ],
-        },
-      }),
-    )
-    expect(multiHtml).toContain('class="vq__num"')
-    expect(multiHtml).not.toContain('<ol><li><span class="md__item">Which commit')
-    expect(multiHtml).toContain('0 of 2 answered · Answer #1 to submit')
-    expect(multiHtml.match(/class="vq__other-input"/g)).toHaveLength(2)
+    // Multi-question cards render ONE question at a time in a stepper (never a tall stacked wall),
+    // with clickable step pills, clean Recommended badges, Next/Back navigation, and one Other textarea per step.
+    const multiQuestion = {
+      requestId: 'q-multi',
+      items: [
+        { id: 'q1', question: 'Which commit should be exported?', options: ['(Recommended) Current main — clean mirror', 'Exact commit'], allowFreeform: true },
+        { id: 'q2', question: 'How should we handle Ray?', options: ['Stop Ray', 'Leave running'], allowFreeform: true },
+      ],
+    }
+    const step1Html = renderToStaticMarkup(createElement(QuestionCard, { plan: null, question: multiQuestion }))
+    expect(step1Html).toContain('Question 1 of 2')
+    expect(step1Html).toContain('Which commit should be exported?')
+    expect(step1Html).not.toContain('Stop Ray')
+    expect(step1Html).toContain('class="vq__rec">Recommended<')
+    expect(step1Html).toContain('class="vq__step is-current"')
+    expect(step1Html).toContain('0 of 2 answered')
+    expect(step1Html).toContain('>Next<')
+    expect(step1Html.match(/class="vq__other-input"/g)).toHaveLength(1)
+
+    const step2Html = renderToStaticMarkup(createElement(QuestionCard, { plan: null, question: multiQuestion, initialIndex: 1 }))
+    expect(step2Html).toContain('Question 2 of 2')
+    expect(step2Html).toContain('How should we handle Ray?')
+    expect(step2Html).not.toContain('Current main')
+    expect(step2Html).toContain('>Back<')
+    expect(step2Html).toContain('Submit')
 
     const vibesCss = readFileSync(join(RENDERER_DIR, 'vibes.css'), 'utf8')
-    expect(vibesCss).toContain('.vq__item+.vq__item{border-top:1px solid var(--x-separator)}')
+    expect(vibesCss).toContain('.vq__stepper{')
     expect(vibesCss).toContain('.vq__other-input{flex:1 1 auto;width:100%;min-width:0;')
   })
 })

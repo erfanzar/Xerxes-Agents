@@ -3319,9 +3319,15 @@ export function FailedCard({ failed }: { failed: NonNullable<Snapshot['failed']>
 
 /** dsh user-questions card: batched questions, options, Other free-text. */
 /** "Label — description" shows as a label over a grey line. Display only: the answer is the whole option. */
-function optionParts(option: string): { label: string; detail: string } {
+function optionParts(option: string): { label: string; detail: string; recommended: boolean } {
   const at = option.indexOf(' — ')
-  return at > 0 ? { label: option.slice(0, at), detail: option.slice(at + 3) } : { label: option, detail: '' }
+  const rawLabel = at > 0 ? option.slice(0, at) : option
+  const detail = at > 0 ? option.slice(at + 3) : ''
+  const leadingRec = /^\s*\(recommended\)\s*/i
+  const trailingRec = /\s*\(recommended\)\s*$/i
+  const recommended = leadingRec.test(rawLabel) || trailingRec.test(rawLabel)
+  const cleanLabel = rawLabel.replace(leadingRec, '').replace(trailingRec, '').trim()
+  return { label: cleanLabel || rawLabel, detail, recommended }
 }
 
 /** Toggle a choice in single-select or multi-select question state. */
@@ -3461,37 +3467,134 @@ export function UrlConsentCard({
 export function QuestionCard({
   question,
   plan,
+  initialIndex = 0,
 }: {
   question: NonNullable<Snapshot['question']>
   plan: Snapshot['plan']
+  /** Starting step index for multi-question stepper (0-based; used for deterministic SSR tests). */
+  initialIndex?: number
 }): ReactElement {
   const [selections, setSelections] = useState<Record<string, string[]>>({})
   const [others, setOthers] = useState<Record<string, string>>({})
+  const [stepIndex, setStepIndex] = useState<number>(() =>
+    Math.max(0, Math.min(initialIndex, Math.max(0, question.items.length - 1))),
+  )
   const cardRef = useRef<HTMLDivElement>(null)
+  const autoAdvanceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const isUrlMode = question.mode === 'url'
   const review = !isUrlMode && isPlanReview(question)
   const vibes = useVibesStyle()
+  const total = question.items.length
+  const safeIndex = total > 0 ? Math.max(0, Math.min(stepIndex, total - 1)) : 0
+  const activeItem = question.items[safeIndex]
+
+  const cancelAutoAdvance = (): void => {
+    if (autoAdvanceTimerRef.current !== null) {
+      clearTimeout(autoAdvanceTimerRef.current)
+      autoAdvanceTimerRef.current = null
+    }
+  }
+
+  useEffect(() => {
+    cancelAutoAdvance()
+    setSelections({})
+    setOthers({})
+    setStepIndex(Math.max(0, Math.min(initialIndex, Math.max(0, question.items.length - 1))))
+  }, [question.requestId, initialIndex, question.items.length])
+
+  useEffect(() => () => cancelAutoAdvance(), [])
+
+  const isItemAnsweredIn = (
+    item: NonNullable<Snapshot['question']>['items'][number],
+    selMap: Record<string, string[]>,
+    othMap: Record<string, string>,
+  ): boolean =>
+    (item.allowFreeform && Boolean(othMap[item.id]?.trim())) || (selMap[item.id]?.length ?? 0) > 0
+
   const isItemAnswered = (item: NonNullable<Snapshot['question']>['items'][number]): boolean =>
-    (item.allowFreeform && Boolean(others[item.id]?.trim())) || (selections[item.id]?.length ?? 0) > 0
+    isItemAnsweredIn(item, selections, others)
+
   const missingIndices = question.items
     .map((item, idx) => (isItemAnswered(item) ? -1 : idx))
     .filter(idx => idx >= 0)
-  const answeredCount = question.items.length - missingIndices.length
-  const canSubmit = question.items.length > 0 && missingIndices.length === 0
-  const focusQuestionItem = (index: number): void => {
-    const section = cardRef.current?.querySelector<HTMLElement>(`[data-vq-index="${index}"]`)
-    if (!section) return
-    section.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' })
-    const target = section.querySelector<HTMLElement>('button[role="radio"], button[role="checkbox"], textarea, input')
-    target?.focus()
+  const answeredCount = total - missingIndices.length
+  const canSubmit = total > 0 && missingIndices.length === 0
+
+  const nextUnansweredAfter = (
+    fromIndex: number,
+    selMap: Record<string, string[]>,
+    othMap: Record<string, string>,
+  ): number => {
+    for (let i = fromIndex + 1; i < total; i += 1) {
+      const candidate = question.items[i]
+      if (candidate && !isItemAnsweredIn(candidate, selMap, othMap)) return i
+    }
+    for (let i = 0; i < fromIndex; i += 1) {
+      const candidate = question.items[i]
+      if (candidate && !isItemAnsweredIn(candidate, selMap, othMap)) return i
+    }
+    return -1
   }
+
+  const goToStep = (index: number): void => {
+    cancelAutoAdvance()
+    if (total === 0) return
+    const clamped = Math.max(0, Math.min(index, total - 1))
+    setStepIndex(clamped)
+    cardRef.current?.focus({ preventScroll: true })
+  }
+
+  const scheduleAutoAdvance = (targetIndex: number): void => {
+    cancelAutoAdvance()
+    autoAdvanceTimerRef.current = setTimeout(() => {
+      autoAdvanceTimerRef.current = null
+      setStepIndex(targetIndex)
+      cardRef.current?.focus({ preventScroll: true })
+    }, 150)
+  }
+
+  const selectPresetOption = (
+    item: NonNullable<Snapshot['question']>['items'][number],
+    option: string,
+    index: number,
+  ): void => {
+    const multi = item.multiSelect === true
+    const nextOptionList = toggleQuestionOption(selections[item.id] ?? [], option, multi)
+    const nextSelections = { ...selections, [item.id]: nextOptionList }
+    const nextOthers = multi ? others : { ...others, [item.id]: '' }
+    setSelections(nextSelections)
+    if (!multi) setOthers(nextOthers)
+    if (!multi && total > 1 && nextOptionList.length > 0) {
+      const nextStep = nextUnansweredAfter(index, nextSelections, nextOthers)
+      if (nextStep >= 0 && nextStep !== index) {
+        scheduleAutoAdvance(nextStep)
+      }
+    }
+  }
+
   const submit = (): void => {
+    cancelAutoAdvance()
     if (!canSubmit) {
-      if (missingIndices[0] !== undefined) focusQuestionItem(missingIndices[0])
+      if (missingIndices[0] !== undefined) goToStep(missingIndices[0])
       return
     }
     store.answerQuestion(question.requestId, formatQuestionAnswers(question.items, selections, others))
   }
+
+  const advanceOrSubmit = (): void => {
+    cancelAutoAdvance()
+    if (canSubmit) {
+      submit()
+      return
+    }
+    const nextMissing = nextUnansweredAfter(safeIndex, selections, others)
+    if (nextMissing >= 0) {
+      goToStep(nextMissing)
+      return
+    }
+    if (safeIndex + 1 < total) goToStep(safeIndex + 1)
+  }
+
   const handleCardKeyDown = (event: React.KeyboardEvent<HTMLDivElement>): void => {
     if (event.defaultPrevented || event.key !== 'Enter') return
     if (event.metaKey || event.ctrlKey) {
@@ -3503,14 +3606,15 @@ export function QuestionCard({
       submit()
     }
   }
+
   useEffect(() => {
     if (review || isUrlMode) return
     const previous = document.activeElement
     cardRef.current?.focus()
     return () => { if (previous instanceof HTMLElement && previous.isConnected) previous.focus() }
   }, [question.requestId, review, isUrlMode])
-  // Number keys choose options while the card is up (not while typing); the
-  // hints are only honest for the FIRST question — later ones have no keys.
+
+  // Number keys 1..9 choose options on the active question step; ArrowLeft / ArrowRight step between questions.
   useEffect(() => {
     if (review || isUrlMode) return // PlanReviewCard & UrlConsentCard own their responses.
     const onKey = (event: KeyboardEvent): void => {
@@ -3518,19 +3622,26 @@ export function QuestionCard({
       if (typeof document !== 'undefined' && document.querySelector('[role="dialog"][aria-modal="true"]')) return
       const target = event.target as HTMLElement | null
       const insideCard = Boolean(target && cardRef.current?.contains(target))
-      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable || (target.tagName === 'BUTTON' && !insideCard))) return
+      const isEditable = Boolean(target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable))
+      if (isEditable || (target?.tagName === 'BUTTON' && !insideCard)) return
+      if (total > 1 && event.key === 'ArrowLeft' && safeIndex > 0) {
+        event.preventDefault()
+        goToStep(safeIndex - 1)
+        return
+      }
+      if (total > 1 && event.key === 'ArrowRight' && safeIndex < total - 1) {
+        event.preventDefault()
+        goToStep(safeIndex + 1)
+        return
+      }
       const number = Number.parseInt(event.key, 10)
       if (!Number.isFinite(number) || number < 1) return
-      const item = question.items[0]
+      const item = question.items[safeIndex]
       if (!item) return
       const option = item.options[number - 1]
       if (!option) return
       event.preventDefault()
-      setSelections(prev => ({
-        ...prev,
-        [item.id]: toggleQuestionOption(prev[item.id] ?? [], option, item.multiSelect === true),
-      }))
-      if (!item.multiSelect) setOthers(prev => ({ ...prev, [item.id]: '' }))
+      selectPresetOption(item, option, safeIndex)
     }
     const onEnter = (event: KeyboardEvent): void => {
       if (event.defaultPrevented || event.key !== 'Enter') return
@@ -3552,7 +3663,7 @@ export function QuestionCard({
       }
       if (target && (isEditable || target.tagName === 'BUTTON')) return
       event.preventDefault()
-      submit()
+      advanceOrSubmit()
     }
     window.addEventListener('keydown', onKey)
     window.addEventListener('keydown', onEnter)
@@ -3561,217 +3672,301 @@ export function QuestionCard({
       window.removeEventListener('keydown', onEnter)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [question, selections, others, review, isUrlMode])
+  }, [question, selections, others, safeIndex, review, isUrlMode])
 
   if (isUrlMode) return <UrlConsentCard question={question} />
   if (review) return <PlanReviewCard question={question} plan={plan} />
+  if (!activeItem) return <></>
+
   if (vibes) {
-    // Claude Code's question card: a "Needs your input" pill, the question on a
-    // header band, radio/checkbox rows (label over a grey description), an Other
-    // row, then Skip and Submit (⌘↵) at the right.
     const skippable = question.items.every(item => item.allowFreeform)
-    const skip = (): void => store.answerQuestion(question.requestId, Object.fromEntries(question.items.map(item => [item.id, 'Skipped'])))
+    const skip = (): void => {
+      cancelAutoAdvance()
+      store.answerQuestion(question.requestId, Object.fromEntries(question.items.map(item => [item.id, 'Skipped'])))
+    }
+    const item = activeItem
+    const picked = selections[item.id] ?? []
+    const other = others[item.id] ?? ''
+    const multi = item.multiSelect === true
+    const currentAnswered = isItemAnswered(item)
+    const isLastStep = safeIndex >= total - 1
+    const showNext = total > 1 && !isLastStep
+    const showSubmit = total === 1 || isLastStep || canSubmit
+    const progressPct = total > 0 ? Math.round((answeredCount / total) * 100) : 0
+
     return (
       <div ref={cardRef} tabIndex={-1} className="vq" role="form" aria-label="Agent questions" onKeyDown={handleCardKeyDown}>
-        <span className="vq__pill"><span className="vq__ring" aria-hidden="true" />Needs your input</span>
         <div className="vq__card">
-          {question.items.map((item, qi) => {
-            const picked = selections[item.id] ?? []
-            const other = others[item.id] ?? ''
-            const multi = item.multiSelect === true
-            const answered = isItemAnswered(item)
-            return (
-              <div
-                key={item.id}
-                className="vq__item"
-                data-vq-index={qi}
-                data-answered={answered ? 'true' : undefined}
-                data-multi={multi ? 'true' : undefined}
-              >
-                <div className="vq__q">
-                  {question.items.length > 1 && (
-                    <span className="vq__num" data-answered={answered ? 'true' : undefined} aria-hidden="true">
-                      {answered ? <Icon name="check" size={11} /> : qi + 1}
-                    </span>
-                  )}
-                  <div className="vq__qtext">
-                    <Markdown text={item.question} className="md--compact" />
-                    {multi && <span className="vq__multi-hint">Select all that apply</span>}
-                  </div>
-                </div>
-                <div className="vq__opts" role={multi ? 'group' : 'radiogroup'} aria-label={item.question}>
-                  {item.options.map(option => {
-                    const on = picked.includes(option)
-                    const { label, detail } = optionParts(option)
+          <div className="vq__bar">
+            <div className="vq__bar-title">
+              <span className="vq__ring" aria-hidden="true" />
+              <span>{total > 1 ? `Question ${safeIndex + 1} of ${total}` : 'Needs your input'}</span>
+            </div>
+            {total > 1 && (
+              <div className="vq__stepper" role="tablist" aria-label="Question steps">
+                <button
+                  type="button"
+                  className="vq__nav-btn"
+                  aria-label="Previous question"
+                  disabled={safeIndex <= 0}
+                  onClick={() => goToStep(safeIndex - 1)}
+                >
+                  <T3Icon name="arrowLeft" size={12} />
+                </button>
+                <div className="vq__steps">
+                  {question.items.map((stepItem, idx) => {
+                    const stepDone = isItemAnswered(stepItem)
+                    const isCurrent = idx === safeIndex
                     return (
                       <button
-                        key={option}
+                        key={stepItem.id}
                         type="button"
-                        role={multi ? 'checkbox' : 'radio'}
-                        aria-checked={on}
-                        className="vq__opt"
-                        onClick={() => {
-                          if (!multi) setOthers(prev => ({ ...prev, [item.id]: '' }))
-                          setSelections(prev => ({
-                            ...prev,
-                            [item.id]: toggleQuestionOption(prev[item.id] ?? [], option, multi),
-                          }))
-                        }}
+                        role="tab"
+                        aria-selected={isCurrent}
+                        aria-label={`Question ${idx + 1}${stepDone ? ' (answered)' : ''}`}
+                        title={stepItem.question}
+                        className={`vq__step${isCurrent ? ' is-current' : ''}${stepDone ? ' is-done' : ''}`}
+                        onClick={() => goToStep(idx)}
                       >
-                        {multi
-                          ? <span className="vq__check" aria-hidden="true">{on ? <Icon name="check" size={12} /> : null}</span>
-                          : <span className="vq__radio" aria-hidden="true" />}
-                        <span className="vq__text"><span className="vq__label">{label}</span>{detail && <span className="vq__detail">{detail}</span>}</span>
+                        {stepDone ? <Icon name="check" size={10} /> : idx + 1}
                       </button>
                     )
                   })}
-                  {item.allowFreeform && (
-                    <div
-                      className="vq__opt vq__opt--other"
-                      data-checked={other.trim() !== '' ? 'true' : 'false'}
-                      onClick={event => {
-                        const target = event.target as HTMLElement | null
-                        if (target?.closest('textarea, input, button')) return
-                        const field = event.currentTarget.querySelector<HTMLElement>('textarea, input')
-                        field?.focus()
-                      }}
-                    >
-                      <button
-                        type="button"
-                        role={multi ? 'checkbox' : 'radio'}
-                        aria-checked={other.trim() !== ''}
-                        aria-label={item.placeholder || 'Other'}
-                        className="vq__other-toggle"
-                        onClick={event => {
-                          const field = event.currentTarget.parentElement?.querySelector<HTMLElement>('textarea, input')
-                          field?.focus()
-                          if (!multi) setSelections(prev => ({ ...prev, [item.id]: [] }))
-                        }}
-                      >
-                        {multi
-                          ? <span className="vq__check" aria-hidden="true">{other.trim() !== '' ? <Icon name="check" size={12} /> : null}</span>
-                          : <span className="vq__radio" aria-hidden="true" />}
-                      </button>
-                      <textarea
-                        rows={1}
-                        className="vq__other-input"
-                        aria-label="Other answer"
-                        placeholder={item.placeholder || 'Type a custom answer…'}
-                        spellCheck={false}
-                        value={other}
-                        onChange={e => {
-                          const el = e.currentTarget
-                          el.style.height = 'auto'
-                          el.style.height = `${Math.min(el.scrollHeight, 160)}px`
-                          const value = el.value
-                          setOthers(prev => ({ ...prev, [item.id]: value }))
-                          if (!multi) setSelections(prev => ({ ...prev, [item.id]: [] }))
-                        }}
-                        onKeyDown={e => {
-                          if (!e.nativeEvent.isComposing && e.key === 'Enter' && (e.metaKey || e.ctrlKey || !e.shiftKey)) {
-                            e.preventDefault()
-                            e.stopPropagation()
-                            submit()
-                          }
-                        }}
-                      />
-                    </div>
-                  )}
                 </div>
+                <button
+                  type="button"
+                  className="vq__nav-btn"
+                  aria-label="Next question"
+                  disabled={safeIndex >= total - 1}
+                  onClick={() => goToStep(safeIndex + 1)}
+                >
+                  <T3Icon name="arrowRight" size={12} />
+                </button>
               </div>
-            )
-          })}
-          <div className="vq__actions">
-            {question.items.length > 1 && (
-              missingIndices.length > 0
-                ? (
+            )}
+            {total > 1 && (
+              <span className="vq__progress" aria-hidden="true">
+                <span className="vq__progress-fill" style={{ width: `${progressPct}%` }} />
+              </span>
+            )}
+          </div>
+
+          <div
+            key={item.id}
+            className="vq__item"
+            data-vq-index={safeIndex}
+            data-answered={currentAnswered ? 'true' : undefined}
+            data-multi={multi ? 'true' : undefined}
+          >
+            <div className="vq__q">
+              <div className="vq__qtext">
+                <Markdown text={item.question} className="md--compact" />
+                {multi && <span className="vq__multi-hint">Select all that apply</span>}
+              </div>
+            </div>
+
+            <div className="vq__opts" role={multi ? 'group' : 'radiogroup'} aria-label={item.question}>
+              {item.options.map((option, oi) => {
+                const on = picked.includes(option)
+                const { label, detail, recommended } = optionParts(option)
+                return (
                   <button
+                    key={option}
                     type="button"
-                    className="vq__status vq__status--pending"
-                    onClick={() => focusQuestionItem(missingIndices[0]!)}
+                    role={multi ? 'checkbox' : 'radio'}
+                    aria-checked={on}
+                    className="vq__opt"
+                    onClick={() => selectPresetOption(item, option, safeIndex)}
                   >
-                    {answeredCount} of {question.items.length} answered · Answer #{missingIndices[0]! + 1} to submit
+                    {multi
+                      ? <span className="vq__check" aria-hidden="true">{on ? <Icon name="check" size={12} /> : null}</span>
+                      : <span className="vq__radio" aria-hidden="true" />}
+                    <span className="vq__text">
+                      <span className="vq__label-row">
+                        <span className="vq__label">{label}</span>
+                        {recommended && <span className="vq__rec">Recommended</span>}
+                      </span>
+                      {detail && <span className="vq__detail">{detail}</span>}
+                    </span>
+                    {oi < 9 && <kbd className="vq__key" aria-hidden="true">{oi + 1}</kbd>}
                   </button>
                 )
-                : (
-                  <span className="vq__status vq__status--ready">
-                    <Icon name="check" size={12} /> All {question.items.length} answered
-                  </span>
-                )
-            )}
-            {skippable && <button type="button" className="vq__skip" title="Answer “Skipped” and let the agent continue" onClick={skip}>Skip</button>}
-            <button type="button" className="vq__submit" disabled={!canSubmit} onClick={submit}>Submit <kbd>⌘</kbd><kbd>↵</kbd></button>
+              })}
+              {item.allowFreeform && (
+                <div
+                  className="vq__opt vq__opt--other"
+                  data-checked={other.trim() !== '' ? 'true' : 'false'}
+                  onClick={event => {
+                    const target = event.target as HTMLElement | null
+                    if (target?.closest('textarea, input, button')) return
+                    const field = event.currentTarget.querySelector<HTMLElement>('textarea, input')
+                    field?.focus()
+                  }}
+                >
+                  <button
+                    type="button"
+                    role={multi ? 'checkbox' : 'radio'}
+                    aria-checked={other.trim() !== ''}
+                    aria-label={item.placeholder || 'Other'}
+                    className="vq__other-toggle"
+                    onClick={event => {
+                      cancelAutoAdvance()
+                      const field = event.currentTarget.parentElement?.querySelector<HTMLElement>('textarea, input')
+                      field?.focus()
+                      if (!multi) setSelections(prev => ({ ...prev, [item.id]: [] }))
+                    }}
+                  >
+                    {multi
+                      ? <span className="vq__check" aria-hidden="true">{other.trim() !== '' ? <Icon name="check" size={12} /> : null}</span>
+                      : <span className="vq__radio" aria-hidden="true" />}
+                  </button>
+                  <textarea
+                    rows={1}
+                    className="vq__other-input"
+                    aria-label="Other answer"
+                    placeholder={item.placeholder || (item.options.length > 0 ? 'Other — type a custom answer…' : 'Type your answer…')}
+                    spellCheck={false}
+                    value={other}
+                    onChange={e => {
+                      cancelAutoAdvance()
+                      const el = e.currentTarget
+                      el.style.height = 'auto'
+                      el.style.height = `${Math.min(el.scrollHeight, 160)}px`
+                      const value = el.value
+                      setOthers(prev => ({ ...prev, [item.id]: value }))
+                      if (!multi) setSelections(prev => ({ ...prev, [item.id]: [] }))
+                    }}
+                    onKeyDown={e => {
+                      if (!e.nativeEvent.isComposing && e.key === 'Enter' && (e.metaKey || e.ctrlKey || !e.shiftKey)) {
+                        e.preventDefault()
+                        e.stopPropagation()
+                        if (e.metaKey || e.ctrlKey) submit()
+                        else advanceOrSubmit()
+                      }
+                    }}
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="vq__actions">
+            <div className="vq__actions-left">
+              {total > 1 && safeIndex > 0 && (
+                <button type="button" className="vq__back" onClick={() => goToStep(safeIndex - 1)}>
+                  <T3Icon name="arrowLeft" size={12} />
+                  <span>Back</span>
+                </button>
+              )}
+              {total > 1 && (
+                missingIndices.length > 0
+                  ? (
+                    <button
+                      type="button"
+                      className="vq__status vq__status--pending"
+                      onClick={() => goToStep(missingIndices[0]!)}
+                    >
+                      {answeredCount} of {total} answered
+                    </button>
+                  )
+                  : (
+                    <span className="vq__status vq__status--ready">
+                      <Icon name="check" size={12} /> All {total} answered
+                    </span>
+                  )
+              )}
+            </div>
+            <div className="vq__actions-right">
+              {skippable && <button type="button" className="vq__skip" title="Answer “Skipped” and let the agent continue" onClick={skip}>Skip</button>}
+              {showNext && (
+                <button
+                  type="button"
+                  className={`vq__next${!showSubmit && currentAnswered ? ' is-primary' : ''}`}
+                  onClick={() => goToStep(safeIndex + 1)}
+                >
+                  <span>Next</span>
+                  <T3Icon name="arrowRight" size={12} />
+                </button>
+              )}
+              {showSubmit && (
+                <button type="button" className="vq__submit" disabled={!canSubmit} onClick={submit}>
+                  Submit <kbd>⌘</kbd><kbd>↵</kbd>
+                </button>
+              )}
+            </div>
           </div>
         </div>
       </div>
     )
   }
+
+  const picked = selections[activeItem.id] ?? []
+  const multi = activeItem.multiSelect === true
   return (
     <div ref={cardRef} tabIndex={-1} className="qcard" role="form" aria-label="Agent questions" onKeyDown={handleCardKeyDown}>
       <div className="qcard__head">
         <span className="approval__dot" aria-hidden="true" />
-        <span className="qcard__title">{question.items.length === 1 ? 'The agent has a question' : `The agent has ${question.items.length} questions`}</span>
+        <span className="qcard__title">{total === 1 ? 'The agent has a question' : `Question ${safeIndex + 1} of ${total}`}</span>
       </div>
-      {question.items.map((item, qi) => {
-        const picked = selections[item.id] ?? []
-        const multi = item.multiSelect === true
-        return (
-          <div key={item.id} style={{ display: 'grid', gap: 6 }}>
-            {/* The question is the agent's prose: paths in backticks and short
-                lists read as they were written, not as raw markup. */}
-            <div className="qcard__q">
-              {question.items.length > 1 && <span className="vq__num" data-answered={isItemAnswered(item) ? 'true' : undefined} aria-hidden="true">{qi + 1}</span>}
-              <Markdown text={item.question} className="md--compact" />
-              {multi && <span className="vq__multi-hint">Select all that apply</span>}
-            </div>
-            {item.options.length > 0 && (
-              <div className="optlist" role={multi ? 'group' : 'radiogroup'} aria-label={item.question}>
-                {item.options.map((option, oi) => {
-                  const on = picked.includes(option)
-                  return (
-                    <button
-                      key={option}
-                      type="button"
-                      role={multi ? 'checkbox' : 'radio'}
-                      aria-checked={on}
-                      className={`opt${on ? ' is-approve' : ''}`}
-                      onClick={() => {
-                        if (!multi) setOthers(prev => ({ ...prev, [item.id]: '' }))
-                        setSelections(prev => ({
-                          ...prev,
-                          [item.id]: toggleQuestionOption(prev[item.id] ?? [], option, multi),
-                        }))
-                      }}
-                    >
-                      <span className="opt__label">{option}</span>
-                      {/* Keys drive the first question only — no kbd badge
-                          on later questions would advertise a dead key. */}
-                      <span className="opt__kbd">{on ? <Icon name="check" size={12} /> : qi === 0 && oi < 9 ? <kbd>{oi + 1}</kbd> : null}</span>
-                    </button>
-                  )
-                })}
-              </div>
-            )}
-            {item.allowFreeform && (
-              <div className="otherbox">
-                <input
-                  aria-label="Other answer"
-                  placeholder={item.placeholder || (item.options.length ? 'Or type your own answer…' : 'Type your answer…')}
-                  spellCheck={false}
-                  value={others[item.id] ?? ''}
-                  onChange={e => {
-                    setOthers(prev => ({ ...prev, [item.id]: e.target.value }))
-                    if (!multi) setSelections(prev => ({ ...prev, [item.id]: [] }))
-                  }}
-                  onKeyDown={e => { if (!e.nativeEvent.isComposing && e.key === 'Enter' && (e.metaKey || e.ctrlKey || !e.shiftKey)) { e.preventDefault(); e.stopPropagation(); submit() } }}
-                />
-              </div>
-            )}
+      <div key={activeItem.id} style={{ display: 'grid', gap: 6 }}>
+        <div className="qcard__q">
+          <Markdown text={activeItem.question} className="md--compact" />
+          {multi && <span className="vq__multi-hint">Select all that apply</span>}
+        </div>
+        {activeItem.options.length > 0 && (
+          <div className="optlist" role={multi ? 'group' : 'radiogroup'} aria-label={activeItem.question}>
+            {activeItem.options.map((option, oi) => {
+              const on = picked.includes(option)
+              return (
+                <button
+                  key={option}
+                  type="button"
+                  role={multi ? 'checkbox' : 'radio'}
+                  aria-checked={on}
+                  className={`opt${on ? ' is-approve' : ''}`}
+                  onClick={() => selectPresetOption(activeItem, option, safeIndex)}
+                >
+                  <span className="opt__label">{option}</span>
+                  <span className="opt__kbd">{on ? <Icon name="check" size={12} /> : oi < 9 ? <kbd>{oi + 1}</kbd> : null}</span>
+                </button>
+              )
+            })}
           </div>
-        )
-      })}
+        )}
+        {activeItem.allowFreeform && (
+          <div className="otherbox">
+            <input
+              aria-label="Other answer"
+              placeholder={activeItem.placeholder || (activeItem.options.length ? 'Or type your own answer…' : 'Type your answer…')}
+              spellCheck={false}
+              value={others[activeItem.id] ?? ''}
+              onChange={e => {
+                cancelAutoAdvance()
+                setOthers(prev => ({ ...prev, [activeItem.id]: e.target.value }))
+                if (!multi) setSelections(prev => ({ ...prev, [activeItem.id]: [] }))
+              }}
+              onKeyDown={e => {
+                if (!e.nativeEvent.isComposing && e.key === 'Enter' && (e.metaKey || e.ctrlKey || !e.shiftKey)) {
+                  e.preventDefault()
+                  e.stopPropagation()
+                  if (e.metaKey || e.ctrlKey) submit()
+                  else advanceOrSubmit()
+                }
+              }}
+            />
+          </div>
+        )}
+      </div>
       <div className="approval__row">
-        <button type="button" className="btn btn--solid" disabled={!canSubmit} onClick={submit}>{question.items.length === 1 ? 'Send answer' : 'Send answers'} <kbd>⏎</kbd></button>
+        {total > 1 && safeIndex > 0 && (
+          <button type="button" className="btn" onClick={() => goToStep(safeIndex - 1)}>Back</button>
+        )}
+        {total > 1 && safeIndex < total - 1 && (
+          <button type="button" className="btn" onClick={() => goToStep(safeIndex + 1)}>Next</button>
+        )}
+        {(total === 1 || safeIndex === total - 1 || canSubmit) && (
+          <button type="button" className="btn btn--solid" disabled={!canSubmit} onClick={submit}>{total === 1 ? 'Send answer' : 'Send answers'} <kbd>⏎</kbd></button>
+        )}
       </div>
     </div>
   )

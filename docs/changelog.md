@@ -7,6 +7,10 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.65 — 2026-11-26
+
+- **Redesign Desktop `QuestionCard` (`Needs your input`) into a one-question-at-a-time stepper.** Replaces the tall stacked multi-question wall with a compact single-question wizard (`Question 1 of N`) featuring an integrated progress hairline, clickable step pills (`← ✓ 2 3 →`) with answered checkmarks, automatic advance on single-select option choice (staying on the final question for explicit `Submit ⌘↵` confirmation), active-step `1`–`9` keyboard shortcuts and `←` / `→` step navigation, inset option cards with clean emerald `Recommended` badges extracted from `(Recommended)` option labels (while preserving verbatim answer strings), and a dashed-to-solid unified-focus `Other` textarea row across Vibes, Neo, and the classic fallback.
+
 ## 0.8.64 — 2026-11-26
 
 - **Fix `ImportChatModal` CSS cascade & layout clipping.** Adds `flex: none` to `.import-chat-modal__head`, `__tabs`, `__controls`, `__err`, and `__foot` and uses `flex-wrap: wrap` with fixed `30px` pills on `__tabs` so runtime filter tabs and brand icons never squash or clip vertically; adds `.import-chat-modal__search-input` to `#embedded-input-reset` so Vibes, Neo, and Atelier global input focus rules never draw a second border inside the search wrapper; and scopes all modal tokens cleanly across Vibes and Neo.

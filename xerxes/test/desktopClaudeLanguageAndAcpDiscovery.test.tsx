@@ -17,7 +17,7 @@ import {
   AcpThinkingPicker,
   extraAcpConfigOptions,
 } from '../src/desktop/renderer/AcpRuntimePicker.js'
-import { Shell, formatQuestionAnswers, toggleQuestionOption } from '../src/desktop/renderer/App.js'
+import { QuestionCard, Shell, formatQuestionAnswers, toggleQuestionOption } from '../src/desktop/renderer/App.js'
 import { AcpCustomizePanel, DesktopPage, RailAddMenu } from '../src/desktop/renderer/DesktopPanels.js'
 import { ArtifactsSection } from '../src/desktop/renderer/RailSections.js'
 import {
@@ -836,14 +836,21 @@ describe('Part 2 — Automatic ACP Skill & Runtime Feature Discovery + Strict Is
       q2: 'Core roster: Xerxes, Coder, Reviewer\nImmortals sprites\nCustom mascot',
     })
 
-    // Shell renders role="radio" for single-select & role="checkbox" + "Select all that apply" for multi-select
-    const qHtml = renderToStaticMarkup(createElement(Shell, { snap: sampleSnapshot({ question: q! }) }))
-    expect(qHtml).toContain('role="radiogroup"')
-    expect(qHtml).toContain('role="radio"')
-    expect(qHtml).toContain('role="group"')
-    expect(qHtml).toContain('role="checkbox"')
-    expect(qHtml).toContain('Select all that apply')
-    expect(qHtml).not.toMatch(HEX_COLOR_RE)
+    // Step 1 renders single-select radio controls (and hides step 2 until stepped);
+    // Step 2 renders multi-select checkbox controls + "Select all that apply".
+    const qHtmlStep1 = renderToStaticMarkup(createElement(Shell, { snap: sampleSnapshot({ question: q! }) }))
+    expect(qHtmlStep1).toContain('Question 1 of 2')
+    expect(qHtmlStep1).toContain('role="radiogroup"')
+    expect(qHtmlStep1).toContain('role="radio"')
+    expect(qHtmlStep1).not.toContain('Immortals sprites')
+    expect(qHtmlStep1).not.toMatch(HEX_COLOR_RE)
+
+    const qHtmlStep2 = renderToStaticMarkup(createElement(QuestionCard, { question: q!, plan: null, initialIndex: 1 }))
+    expect(qHtmlStep2).toContain('Question 2 of 2')
+    expect(qHtmlStep2).toContain('role="group"')
+    expect(qHtmlStep2).toContain('role="checkbox"')
+    expect(qHtmlStep2).toContain('Select all that apply')
+    expect(qHtmlStep2).not.toMatch(HEX_COLOR_RE)
   })
 
   test('AcpCustomizePanel exposes official agy acp launch options, parses launch metadata, forwards flags on connect, and ArtifactsSection renders read-only brain images', async () => {
