@@ -56,6 +56,7 @@ import {
   type RemoteConnection,
   type RemoteTarget,
 } from './main/remote.js'
+import { SharedRemoteTunnelPool } from './main/remoteTunnelPool.js'
 import { verifyRemoteHost } from './main/remoteHostTrust.js'
 import { isSshTarget, sshDestination } from '../daemon/sshTarget.js'
 import { sshFailure } from '../security/sshDiagnostics.js'
@@ -347,6 +348,38 @@ const workspaceSurfaces = new Map<number, WorkspaceSurface>()
 const activeSurfaces = new Map<number, number>()
 const contextReaders = new Map<number, () => Promise<WorkspaceContext>>()
 const savedHostContexts = new SavedHostContexts({ list: () => desktopMachineCommand(join(xerxesHome(), 'machines.json'), 'list') })
+/** One shared SSH `-L` tunnel per remote host (`machine.target`), multiplexed across views. */
+const remoteTunnelPool = new SharedRemoteTunnelPool()
+/** SSH hosts whose host key already succeeded in this app session (StrictHostKeyChecking=yes still guards every call). */
+const verifiedSshTargets = new Set<string>()
+/** SSH hosts whose background provider CLI check has already started this app session. */
+const remoteProviderSetupStarted = new Set<string>()
+const CONTEXT_READER_TTL_MS = 15_000
+
+function ensureRemoteProviderClisInBackground(machine: RemoteTarget): void {
+  if (remoteProviderSetupStarted.has(machine.target)) return
+  remoteProviderSetupStarted.add(machine.target)
+  const controller = new AbortController()
+  void ensureRemoteProviderClis(machine, controller.signal).catch(error => {
+    remoteProviderSetupStarted.delete(machine.target)
+    console.warn(`Provider CLI setup failed on ${machine.alias}: ${error instanceof Error ? error.message : String(error)}`)
+  })
+}
+
+function resultHasExternalAcp(result: unknown): boolean {
+  if (!result || typeof result !== 'object' || Array.isArray(result)) return false
+  const rec = result as Record<string, unknown>
+  const sess = rec.session && typeof rec.session === 'object' && !Array.isArray(rec.session)
+    ? (rec.session as Record<string, unknown>)
+    : undefined
+  const check = (binding: unknown): boolean => {
+    if (!binding || typeof binding !== 'object' || Array.isArray(binding)) return false
+    const row = binding as Record<string, unknown>
+    return (row.connected === true && row.transport !== 'native')
+      || (typeof row.agent_id === 'string' && row.agent_id !== '' && row.agent_id !== 'xerxes' && row.transport !== 'native')
+  }
+  return check(rec.acp_binding) || check(rec.saved_acp_binding) || check(sess?.acp_binding) || check(sess?.saved_acp_binding)
+}
 /**
  * Shared read-only local ("This Mac") session reader so remote SSH views ALWAYS
  * show real local sessions under This Mac — even when no local view is open.
@@ -568,17 +601,43 @@ function closeActiveSurface(): void {
   if (next !== undefined) activateSurface(next)
 }
 
-/** The view in this window already showing that SSH workspace (and session, when given). */
-function remoteViewOf(host: BrowserWindow, machine: RemoteTarget, sessionId?: string): number | undefined {
+/** Whether an open surface is bound to the same SSH host and folder (accounting for resolved git-root cwd). */
+function matchesRemoteSurface(id: number, state: ReturnType<NonNullable<ReturnType<typeof windowStates.get>>> | undefined, machine: RemoteTarget): boolean {
+  if (!state?.remote) return false
+  if (sameRemote(state.remote, machine)) return true
+  const resolvedCwd = surfaceSessions.get(id)?.cwd
+  return Boolean(
+    state.remote.target === machine.target
+    && resolvedCwd
+    && cleanFolder(resolvedCwd) === cleanFolder(machine.workspacePath),
+  )
+}
+
+/** The view in this window already showing that SSH workspace (and session, or an idle view to reuse when requested). */
+function remoteViewOf(host: BrowserWindow, machine: RemoteTarget, sessionId?: string, options?: { readonly reuseIdle?: boolean }): number | undefined {
   for (const [id, surface] of workspaceSurfaces) {
     const state = windowStates.get(id)?.()
-    if (surface.host === host && sameRemote(state?.remote, machine) && (!sessionId || state?.sessionId === sessionId)) return id
+    if (surface.host === host && matchesRemoteSurface(id, state, machine) && (!sessionId || state?.sessionId === sessionId)) return id
+  }
+  if (options?.reuseIdle && sessionId) {
+    // Reuse an idle, non-busy view already attached to the same SSH host & folder
+    // instead of spawning a duplicate Chromium renderer and reloading the page.
+    let bestIdle: { id: number; lastActiveAt: number } | undefined
+    for (const [id, surface] of workspaceSurfaces) {
+      if (surface.host !== host || surface.hasActiveTurn || surface.isBusy()) continue
+      const state = windowStates.get(id)?.()
+      if (!matchesRemoteSurface(id, state, machine)) continue
+      if (!bestIdle || surface.lastActiveAt > bestIdle.lastActiveAt) {
+        bestIdle = { id, lastActiveAt: surface.lastActiveAt }
+      }
+    }
+    if (bestIdle) return bestIdle.id
   }
   return undefined
 }
 
 function openRemoteView(host: BrowserWindow, machine: RemoteTarget, sessionId?: string): void {
-  const existing = remoteViewOf(host, machine, sessionId)
+  const existing = remoteViewOf(host, machine, sessionId, { reuseIdle: true })
   if (existing !== undefined) { activateSurface(existing); if (sessionId) showTask(existing, sessionId); return }
   createWorkspaceWindow(null, { workspace: null, remote: machine, sessionId: sessionId ?? null,
     bounds: host.getNormalBounds(), maximized: host.isMaximized(), fullscreen: host.isFullScreen(),
@@ -726,6 +785,10 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
   surfaceSessions.set(id, session)
   activateSurface(id)
   let offlineTurnClearTimer: ReturnType<typeof setTimeout> | undefined
+  let cachedSessions: WorkspaceContext['sessions'] = []
+  let lastSessionsFetchedAt = 0
+  let pendingSessions: Promise<void> | undefined
+  const invalidateCachedSessions = () => { lastSessionsFetchedAt = 0 }
   const attach = (next?: DaemonRpc) => {
     clearTimeout(offlineTurnClearTimer)
     surfaceRecord.hasActiveTurn = false
@@ -763,10 +826,12 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
       // A turn that ended (perhaps because access was lost while it ran, after
       // an app restart) leaves the conversation idle: bind it again now, so a
       // Retry works instead of failing the same way.
+      if (type === 'turn_end') invalidateCachedSessions()
       if (type === 'turn_end' && remote && providerForwarding) void followLocalProviders(providerForwarding)
     }, (method, result) => {
       if (session.observe(method, result)) scheduleWindowSave()
       if ((method === 'initialize' || method === 'session.open') && result && typeof result === 'object') {
+        invalidateCachedSessions()
         const sess = (result as { session?: unknown }).session
         if (sess && typeof sess === 'object' && !Array.isArray(sess)) {
           const rec = sess as Record<string, unknown>
@@ -778,7 +843,11 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
       }
       // Opening or starting a conversation on an SSH host: keep it on this
       // computer's sign-in provider (ChatGPT, Claude Code), whose login stays here.
-      if ((method === 'initialize' || method === 'session.open') && remote && providerForwarding) void followLocalProviders(providerForwarding)
+      // Skip when the session is already bound to an external ACP agent (e.g. Antigravity),
+      // avoiding redundant session.status + relay inventory round-trips on every chat switch.
+      if ((method === 'initialize' || method === 'session.open') && remote && providerForwarding && !resultHasExternalAcp(result)) {
+        void followLocalProviders(providerForwarding)
+      }
     })
   }
   const handle = <Args extends unknown[], Result>(channel: string, handler: (event: IpcMainInvokeEvent, ...args: Args) => Result): void => {
@@ -1036,11 +1105,20 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     remoteAttempt = controller
     remoteError = ''
     try {
-      let next = await openRemote(machine, controller.signal, (error) => {
-        remoteError = error.message
-      }, undefined, {
-        confirmHostKey: confirmSshHostKey,
-      })
+      let next = await remoteTunnelPool.acquire(
+        machine,
+        controller.signal,
+        (error) => {
+          remoteError = error.message
+        },
+        (targetMachine, openSignal, onTunnelFailure) =>
+          openRemote(targetMachine, openSignal, onTunnelFailure, undefined, {
+            ...(verifiedSshTargets.has(targetMachine.target) ? {} : { confirmHostKey: confirmSshHostKey }),
+            providerSetup: false,
+          }),
+      )
+      verifiedSshTargets.add(machine.target)
+      ensureRemoteProviderClisInBackground(machine)
       const localProviders = new DaemonRpc({projectDir:homedir()})
       let forwarding: DesktopProviderForwarding
       const rpc = new DaemonRpc({ projectDir: next.projectDir, socketPath: next.socketPath,
@@ -1493,16 +1571,16 @@ function createWorkspaceWindow(initialWorkspace: string | null = null, saved?: S
     windowGroup: String(window.id), active: activeSurfaces.get(window.id) === id,
     sessionId: session.current, bounds: window.getNormalBounds(), maximized: window.isMaximized(), fullscreen: window.isFullScreen(),
   }))
-  let cachedSessions: WorkspaceContext['sessions'] = []
-  let pendingSessions: Promise<void> | undefined
   contextReaders.set(id, async () => {
-    if (daemon?.online && !pendingSessions) {
+    const stale = cachedSessions.length === 0 || Date.now() - lastSessionsFetchedAt >= CONTEXT_READER_TTL_MS
+    if (daemon?.online && stale && !pendingSessions) {
       pendingSessions = (async () => { try {
         const [savedRows, liveRows] = await Promise.all([
           daemon.call<Record<string, unknown>>('session.list', { kind: 'main', scope: 'global', limit: 60 }),
           daemon.call<Record<string, unknown>>('session.active_list', { history_limit: 0 }),
         ])
         cachedSessions = contextSessions(savedRows.sessions, liveRows.sessions)
+        lastSessionsFetchedAt = Date.now()
       } catch { /* A disconnected endpoint keeps its last known navigation. */ }
       finally { pendingSessions = undefined }
       })()
@@ -1747,6 +1825,7 @@ void app.whenReady().then(async () => {
     powerMonitor.removeListener('unlock-screen', onSystemResume)
     savedHostContexts.dispose()
     savedLocalContexts.dispose()
+    void remoteTunnelPool.closeAll()
     localContextDaemon?.dispose()
     localContextDaemon = null
   })

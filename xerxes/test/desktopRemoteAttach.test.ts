@@ -8,8 +8,10 @@ import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises'
 import { createServer, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { openRemote, runCaptured, type RemoteOpenPorts } from '../src/desktop/main/remote.js'
+import { openRemote, runCaptured, type RemoteConnection, type RemoteOpenPorts } from '../src/desktop/main/remote.js'
 import { remoteAttachAddress, remoteAttachProgram } from '../src/desktop/main/remoteAttach.js'
+import { ensureRemoteProviderClis } from '../src/desktop/main/remoteProviderSetup.js'
+import { SharedRemoteTunnelPool } from '../src/desktop/main/remoteTunnelPool.js'
 
 const machine = { alias: 'worker', target: 'worker', workspacePath: '/srv/project' }
 const address = { socketPath: '/remote/global.sock', projectDir: machine.workspacePath, version: '0.8.1', buildId: 'a'.repeat(16) }
@@ -215,4 +217,121 @@ test.skipIf(process.platform === 'win32')('attach cancellation closes an unrespo
     controller.abort()
     await expect(pending).rejects.toThrow('cancelled')
   }, false)
+})
+
+test('ensureRemoteProviderClis short-circuits in 1 SSH round-trip when all provider CLIs are already installed', async () => {
+  let calls = 0
+  const result = await ensureRemoteProviderClis(
+    machine,
+    signal(),
+    async () => {
+      calls += 1
+      return 'XERXES_PROVIDER_CLIS {"claude":true,"codex":true,"agy":true}'
+    },
+  )
+  expect(calls).toBe(1)
+  expect(result).toEqual({ claude: true, codex: true, agy: true })
+})
+
+test.skipIf(process.platform === 'win32')('openRemote enables SSH compression on the forwarded tunnel', async () => {
+  let spawnedArgs: string[] = []
+  const connection = await openRemote(machine, signal(), () => {}, undefined, {
+    run: async () => attached,
+    spawnTunnel: args => {
+      spawnedArgs = args
+      return localTunnel(args)
+    },
+    providerSetup: false,
+  })
+  try {
+    expect(spawnedArgs).toContain('Compression=yes')
+  } finally {
+    await connection.close()
+  }
+})
+
+test('SharedRemoteTunnelPool shares one tunnel across concurrent callers and folders, coalesces reconnects, and closes on last release', async () => {
+  const pool = new SharedRemoteTunnelPool()
+  let openCalls = 0
+  let closeCalls = 0
+  let reconnectCalls = 0
+  let triggerFailure!: (error: Error) => void
+
+  const makeConn = (sock: string, dir: string): RemoteConnection => ({
+    socketPath: sock,
+    projectDir: dir,
+    update: async () => ({ ok: true }),
+    reconnect: async (retrySignal, onFailure) => {
+      reconnectCalls += 1
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, 20)
+        retrySignal.addEventListener('abort', () => {
+          clearTimeout(timer)
+          reject(new Error('cancelled'))
+        }, { once: true })
+      })
+      triggerFailure = onFailure
+      return makeConn(`${sock}-reconnected`, dir)
+    },
+    close: async () => {
+      closeCalls += 1
+    },
+  })
+
+  const opener = async (
+    targetMachine: typeof machine,
+    _sig: AbortSignal,
+    onFailure: (error: Error) => void,
+  ): Promise<RemoteConnection> => {
+    openCalls += 1
+    await new Promise(resolve => setTimeout(resolve, 15))
+    triggerFailure = onFailure
+    return makeConn(`/tmp/shared-${openCalls}.sock`, targetMachine.workspacePath)
+  }
+
+  const failuresA: Error[] = []
+  const failuresB: Error[] = []
+  const [leaseA, leaseB] = await Promise.all([
+    pool.acquire(machine, signal(), err => failuresA.push(err), opener),
+    pool.acquire(
+      { alias: 'worker', target: 'worker', workspacePath: '/srv/other-repo/' },
+      signal(),
+      err => failuresB.push(err),
+      opener,
+    ),
+  ])
+
+  expect(openCalls).toBe(1)
+  expect(pool.activeHosts).toBe(1)
+  expect(leaseA.socketPath).toBe('/tmp/shared-1.sock')
+  expect(leaseB.socketPath).toBe('/tmp/shared-1.sock')
+  expect(leaseA.projectDir).toBe('/srv/project')
+  expect(leaseB.projectDir).toBe('/srv/other-repo')
+
+  // Failure fans out to every borrower; concurrent reconnects coalesce into one tunnel replacement.
+  triggerFailure(new Error('ssh dropped'))
+  expect(failuresA).toHaveLength(1)
+  expect(failuresB).toHaveLength(1)
+
+  const abortA = new AbortController()
+  const nextA = leaseA.reconnect(abortA.signal, () => {})
+  const nextB = leaseB.reconnect(signal(), () => {})
+  // Cancelling one waiter does not abort the shared reconnect for the other borrower.
+  abortA.abort()
+  await expect(nextA).rejects.toThrow('cancelled')
+  const recoveredB = await nextB
+  expect(reconnectCalls).toBe(1)
+  expect(recoveredB.socketPath).toBe('/tmp/shared-1.sock-reconnected')
+
+  // Releasing old handles does not close the shared tunnel while recoveredB is still active.
+  const closesBeforeRelease = closeCalls
+  await leaseA.close()
+  await leaseB.close()
+  expect(closeCalls).toBe(closesBeforeRelease)
+  expect(pool.activeHosts).toBe(1)
+
+  // Closing the final active borrower shuts down the pooled tunnel cleanly.
+  await recoveredB.close()
+  expect(closeCalls).toBe(closesBeforeRelease + 1)
+  expect(pool.activeHosts).toBe(0)
 })

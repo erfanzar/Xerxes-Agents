@@ -30,6 +30,7 @@ export function parseProviderCliProbe(output: string): ProviderCliStatus {
 /** Install only missing provider CLIs (`claude`, `codex`, `agy`), then verify all three are executable. */
 export async function ensureRemoteProviderClis(machine: RemoteTarget, signal: AbortSignal, run: RemoteRunner = runCaptured): Promise<ProviderCliStatus> {
   const initial = parseProviderCliProbe(await probeRemote(machine, PROBE, signal, run))
+  if (initial.claude && initial.codex && initial.agy) return initial
   const failures: string[] = []
   for (const name of ['claude', 'codex', 'agy'] as const) {
     if (initial[name]) continue

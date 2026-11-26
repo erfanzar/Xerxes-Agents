@@ -83,6 +83,11 @@ export function historyLimit(value: unknown): number | undefined {
   return value as number
 }
 
+export function encodeHistoryCursor(sessionId: string, index: number, action: HistoryAction): string {
+  const anchor = createHash('sha256').update(JSON.stringify(action)).digest('hex')
+  return Buffer.from(JSON.stringify({ session: sessionId, index, anchor })).toString('base64url')
+}
+
 export function sessionHistoryPage(session: Pick<DaemonSession, 'id' | 'messages' | 'toolExecutions' | 'thinkingContent'>, limit: number, before?: unknown) {
   const actions = sessionHistoryActions(session)
   const anchor = (index: number) => createHash('sha256').update(JSON.stringify(actions[index])).digest('hex')
@@ -97,5 +102,5 @@ export function sessionHistoryPage(session: Pick<DaemonSession, 'id' | 'messages
     end = cursor.index as number
   }
   const start = Math.max(0, end - limit)
-  return { actions: actions.slice(start, end), has_more: start > 0, before: start > 0 ? Buffer.from(JSON.stringify({ session: session.id, index: start, anchor: anchor(start) })).toString('base64url') : null, total_actions: actions.length }
+  return { actions: actions.slice(start, end), start, has_more: start > 0, before: start > 0 ? encodeHistoryCursor(session.id, start, actions[start]!) : null, total_actions: actions.length }
 }

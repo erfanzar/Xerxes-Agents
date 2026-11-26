@@ -1121,6 +1121,33 @@ export function isSpawnTool(name: unknown): boolean {
   return SPAWN_TOOLS.has(tail) || SPAWN_TOOLS.has(tail.replace(/[_-]+/g, ''))
 }
 
+function isRunWorkflowTool(name: unknown): boolean {
+  if (typeof name !== 'string' || !name) return false
+  const tail = (name.split(/[.:/]/).pop() ?? name).trim().toLowerCase()
+  return tail === 'run_workflow' || tail === 'runworkflow'
+}
+
+function workflowOutputText(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (value && typeof value === 'object') {
+    const rec = value as Record<string, unknown>
+    for (const key of ['output', 'message', 'text', 'content', 'summary']) {
+      if (typeof rec[key] === 'string' && rec[key]) return rec[key] as string
+    }
+  }
+  return ''
+}
+
+function extractWorkflowBackgroundTask(value: unknown): { readonly taskId: string; readonly shortId: string } | null {
+  const raw = workflowOutputText(value)
+  if (!raw || !/background task|task id:/i.test(raw)) return null
+  const match = /(?:task id:\s*|task[_\s]?id["']?\s*[:=]\s*["']?)([^\s"'`,;)}\]]+)/i.exec(raw)
+  const taskId = match?.[1]?.trim()
+  if (!taskId) return null
+  const shortId = taskId.split('/').pop() || taskId
+  return { taskId, shortId }
+}
+
 /** Snapshot statuses fold onto the card's display vocabulary. */
 /** Tools whose success changes the session goal. */
 const GOAL_WRITE_TOOLS = new Set(['create_goal', 'update_goal'])
@@ -2056,6 +2083,10 @@ const MAX_AGENT_TEXT_CHARS = 256_000
 const BACKGROUND_STREAM_FRAME_MS = 250
 const SWARM_INSPECT_THROTTLE_MS = 750
 const HEARTBEAT_MS = 5_000
+/** Remote SSH views refresh session lists less frequently on idle heartbeats (live events still update instantly). */
+const REMOTE_HEARTBEAT_LIST_REFRESH_MS = 15_000
+/** Reuse cached external ACP agent list across same-daemon chat switches for this window. */
+const ACP_AGENTS_CACHE_MS = 60_000
 /** A visible but unfocused window refreshes its session lists this often. */
 const UNFOCUSED_LIST_REFRESH_MS = 60_000
 /** How long a first Escape over a running turn waits for the second that stops it. */
@@ -2131,6 +2162,7 @@ export class Store {
   private searchSeq = 0
   private swarmLoadVersion = 0
   private acpLoadVersion = 0
+  private lastAcpAgentsLoadedAt = 0
   private lastAcpConnect: {
     readonly additionalDirectories?: readonly string[]
     readonly agent?: string
@@ -2519,6 +2551,7 @@ export class Store {
         return
       }
       const agents = parseAcpExternalAgents(raw.agents)
+      this.lastAcpAgentsLoadedAt = Date.now()
       if (options.preserveBinding) {
         this.patch({ acpAgents: agents })
         return
@@ -3574,6 +3607,7 @@ export class Store {
     this.patch({ cwd: workspace })
     void Promise.all([this.bridge.getResumeSession?.(), this.bridge.startsFresh?.(), this.bridge.freshPreset?.()]).then(async ([explicitId, fresh, preset]) => {
       const id = explicitId || (workspace && !fresh ? selectedSession((this.frame.storageScope ?? '') + workspace) : null)
+      if (id) this.patch({ navigating: 'session' })
       // A fresh view opened for Creator mode (while another task ran) starts on that preset.
       const start: Record<string, unknown> = id ? { resume_session_id: id } : fresh && preset ? { agent_id: preset } : {}
       try {
@@ -3602,6 +3636,7 @@ export class Store {
   private refreshingContexts = false
   /** When the heartbeat last refreshed the session lists (see beat()). */
   private lastListRefresh = 0
+  private lastRemoteListRefresh = 0
   private stopArmTimer: ReturnType<typeof setTimeout> | undefined
   private async refreshContexts(): Promise<void> {
     if (!this.bridge.getContexts || this.refreshingContexts) return
@@ -4302,7 +4337,8 @@ export class Store {
         await this.bridge.openWorkspaceWindow(row?.cwd || this.frame.cwd, id)
         return false
       }
-      if (row?.cwd && row.cwd !== this.frame.cwd) {
+      const cleanCwd = (value: string): string => value.replace(/\/+$/, '') || '/'
+      if (row?.cwd && cleanCwd(row.cwd) !== cleanCwd(this.frame.cwd)) {
         if (!this.bridge.useWorkspace) throw new Error('This host cannot switch workspaces. Open the session from its project folder.')
         await this.bridge.useWorkspace(row.cwd, id)
         return false
@@ -6384,6 +6420,7 @@ export class Store {
   }
 
   private wentOffline(error?: unknown): void {
+    this.lastAcpAgentsLoadedAt = 0
     this.preparingSubmissions.delete(this.sessionKey)
     // A navigation that ends offline really is a connection problem now.
     if (this.frame.navigating) this.patch({ navigating: null })
@@ -6432,7 +6469,11 @@ export class Store {
     if (this.frame.noWorkspace) return
     if (this.updatingRuntime || this.openingFreshTask || this.openingSession) return
     if (this.frame.connection === 'online') {
-      this.refreshSessions()
+      const isRemote = Boolean(this.frame.storageScope?.startsWith('ssh:'))
+      if (shown || !isRemote || now - this.lastRemoteListRefresh >= REMOTE_HEARTBEAT_LIST_REFRESH_MS) {
+        this.lastRemoteListRefresh = now
+        this.refreshSessions()
+      }
       // Only a restart the person asked for is retried here (it waits for
       // running work). A build mismatch alone never restarts the runtime:
       // other clients (the VS Code extension, another app build) share it,
@@ -6883,7 +6924,13 @@ export class Store {
         ...(inlineAcpBinding ? { acpBinding: inlineAcpBinding, savedAcpBinding: null } : { savedAcpBinding }),
       })
     }
-    void this.refreshAcpAgents({ silent: true })
+    const skipCachedAcpProbe =
+      explicitNavigation
+      && (this.frame.acpAgents?.length ?? 0) > 0
+      && Date.now() - this.lastAcpAgentsLoadedAt < ACP_AGENTS_CACHE_MS
+    if (!skipCachedAcpProbe) {
+      void this.refreshAcpAgents({ silent: true })
+    }
     this.learningReviewToken = null
     this.learningLoadVersion++
     this.patch({ learning: null, learningCounts: { pending_proposals: 0, pending_lessons: 0 }, learningResults: {}, learningReviewBusy: false, learningOpen: false })
@@ -6992,8 +7039,74 @@ export class Store {
     if (!syncAgentMembers(this.agentMembers, fleet)) return
     const members = [...this.agentMembers.values()]
     this.builder.pushAgents(members)
-    if (members.some(m => m.status === 'working')) this.startFleetPoll()
+    if (members.some(m => m.status === 'working' && !m.backgroundTaskId)) this.startFleetPoll()
     this.notify()
+  }
+
+  /** Settle backgrounded `run_workflow` members when `background_changed` reports completion or failure. */
+  private async syncWorkflowMembersFromBackground(): Promise<void> {
+    const tracked = [...this.agentMembers.entries()].filter(
+      ([, member]) => Boolean(member.backgroundTaskId) && member.status === 'working',
+    )
+    if (!tracked.length) return
+    const key = this.sessionKey
+    try {
+      const result = await this.bridge.call('session.background', { session_key: key })
+      if (key !== this.sessionKey) return
+      const rows = Array.isArray(result.items)
+        ? result.items
+        : Array.isArray(result.jobs)
+          ? result.jobs
+          : Array.isArray(result.tasks)
+            ? result.tasks
+            : []
+      let touched = false
+      for (const [memberKey, member] of tracked) {
+        const bgId = member.backgroundTaskId!
+        const shortId = bgId.split('/').pop() || bgId
+        const match = rows.find(raw => {
+          if (!raw || typeof raw !== 'object') return false
+          const item = raw as Record<string, unknown>
+          const id = str(item.id)
+          const rawTaskId = str(item.rawTaskId) || str(item.raw_task_id)
+          return id === `agy-task:${bgId}` || id === bgId || rawTaskId === bgId || id.endsWith(`/${shortId}`) || rawTaskId.endsWith(`/${shortId}`)
+        }) as Record<string, unknown> | undefined
+        if (!match) continue
+        const state = str(match.state).toLowerCase()
+        if (state === 'completed' || state === 'done') {
+          const preview = str(match.outputPreview).trim().split('\n')[0]?.slice(0, 140) || `Background workflow ${shortId} finished.`
+          this.agentMembers.set(memberKey, {
+            ...member,
+            status: 'completed',
+            finishedAt: Date.now(),
+            summary: preview,
+          })
+          touched = true
+        } else if (state === 'failed' || state === 'error') {
+          const errText = str(match.outputPreview).trim().slice(0, 400) || `Background workflow ${shortId} failed.`
+          this.agentMembers.set(memberKey, {
+            ...member,
+            status: 'failed',
+            finishedAt: Date.now(),
+            error: errText,
+          })
+          touched = true
+        } else if (state === 'cancelled' || state === 'stopped') {
+          this.agentMembers.set(memberKey, {
+            ...member,
+            status: 'cancelled',
+            finishedAt: Date.now(),
+          })
+          touched = true
+        }
+      }
+      if (touched) {
+        this.builder.pushAgents([...this.agentMembers.values()])
+        this.notify()
+      }
+    } catch {
+      // Best-effort Activity sync; Activity panel still displays authoritative state.
+    }
   }
 
   /**
@@ -7710,8 +7823,33 @@ export class Store {
               touched = true
             }
             if (touched) this.builder.pushAgents([...this.agentMembers.values()])
+          } else if (id && !spawnError && isRunWorkflowTool(payload.name) && this.agentMembers.size > 0) {
+            const rawVal = payload.return_value ?? payload.result
+            const bg = extractWorkflowBackgroundTask(rawVal)
+            const firstLine = workflowOutputText(rawVal).trim().split('\n')[0]?.slice(0, 140) || ''
+            let touched = false
+            for (const [key, member] of this.agentMembers) {
+              if (!key.startsWith(`${id}:`) || member.runtimeId || member.status !== 'working') continue
+              if (bg) {
+                this.agentMembers.set(key, {
+                  ...member,
+                  backgroundTaskId: bg.taskId,
+                  activity: `Running in Activity (${bg.shortId})`,
+                  summary: `Background workflow ${bg.shortId} is running in Activity.`,
+                })
+              } else {
+                this.agentMembers.set(key, {
+                  ...member,
+                  status: 'completed',
+                  finishedAt: Date.now(),
+                  ...(firstLine ? { summary: firstLine } : {}),
+                })
+              }
+              touched = true
+            }
+            if (touched) this.builder.pushAgents([...this.agentMembers.values()])
           }
-          if (this.pendingAgentCalls.size === 0 && ![...this.agentMembers.values()].some(m => m.status === 'working')) this.stopFleetPoll()
+          if (this.pendingAgentCalls.size === 0 && ![...this.agentMembers.values()].some(m => m.status === 'working' && !m.backgroundTaskId)) this.stopFleetPoll()
         }
         this.builder.push(type, payload)
         this.notify()
@@ -7848,6 +7986,10 @@ export class Store {
         if (matchedEntry && pending && pending.rpcSettled && pending.echoed && pending.applied) {
           this.pendingSteers.delete(matchedEntry[0])
         }
+        return
+      }
+      case 'background_changed': {
+        void this.syncWorkflowMembersFromBackground()
         return
       }
       case 'session_title': {
@@ -8163,8 +8305,9 @@ export class Store {
         this.activeMetricTools.clear()
         // Background children may still be working — the poll only stops
         // here when the card is already terminal; their terminal statuses
-        // land on the committed card as the snapshots settle.
-        if (![...this.agentMembers.values()].some(m => m.status === 'working')) this.stopFleetPoll()
+        // land on the committed card as the snapshots settle. Backgrounded
+        // `run_workflow` tasks settle via `background_changed`, not fleet poll.
+        if (![...this.agentMembers.values()].some(m => m.status === 'working' && !m.backgroundTaskId)) this.stopFleetPoll()
         const elapsedSeconds = this.frame.turnStartedAt != null
           ? Math.max(this.frame.turnSeconds, Math.floor((Date.now() - this.frame.turnStartedAt) / 1000))
           : this.frame.turnSeconds

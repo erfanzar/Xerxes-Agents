@@ -59,6 +59,7 @@
      Kept out of semantics — green/red/amber still mean done/failed/needs. */
   --x-accent: #5b8def;
   --x-accent-soft: rgba(91, 141, 239, 0.12);
+  --x-alert-important: #a371f7;
 
   --accent-soft: rgba(255, 255, 255, 0.06);
   --grad: none;
@@ -111,6 +112,7 @@ html[data-theme='light'] {
   --x-danger: #cf222e;
   --x-accent: #2f62c9;
   --x-accent-soft: rgba(47, 98, 201, 0.10);
+  --x-alert-important: #8250df;
   --accent-soft: rgba(0, 0, 0, 0.05);
   --grad: none;
 }
@@ -1041,13 +1043,49 @@ details[open] > summary::marker { content: "▾\00a0\00a0"; }
 }
 .md strong { color: var(--x-strong); font-weight: 600; }
 .md em { color: var(--x-secondary); }
+.md del { color: var(--x-meta); text-decoration: line-through; }
 .md hr { border: none; border-top: 1px solid var(--x-hairline); margin: 8px 0; }
+.md__item > ul, .md__item > ol { margin-top: 4px; margin-bottom: 0; padding-left: 16px; }
 .md__link { color: var(--x-accent); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
 .md blockquote {
-  margin: 0 0 6px; padding: 2px 0 2px 10px;
-  border-left: 2px solid var(--x-separator); color: var(--x-meta);
+  margin: 0 0 8px; padding: 4px 0 4px 12px;
+  border-left: 2px solid var(--x-separator); color: var(--x-secondary);
 }
-.md blockquote p { margin: 0; }
+.md blockquote > :last-child { margin-bottom: 0; }
+.md__alert {
+  margin: 8px 0; padding: 10px 14px;
+  border-left: 3px solid var(--x-accent);
+  border-radius: 0 var(--r-md) var(--r-md) 0;
+  background: var(--x-accent-soft);
+  color: var(--x-prose);
+}
+.md__alert-title {
+  margin: 0 0 6px !important;
+  display: flex; align-items: center; gap: 6px;
+  font-weight: 600; font-size: 0.92em; letter-spacing: 0.01em;
+  color: var(--x-accent);
+}
+.md__alert-body > :last-child { margin-bottom: 0; }
+.md__alert--tip {
+  border-left-color: var(--x-done);
+  background: color-mix(in srgb, var(--x-done) 10%, transparent);
+}
+.md__alert--tip .md__alert-title { color: var(--x-done); }
+.md__alert--important {
+  border-left-color: var(--x-alert-important);
+  background: color-mix(in srgb, var(--x-alert-important) 11%, transparent);
+}
+.md__alert--important .md__alert-title { color: var(--x-alert-important); }
+.md__alert--warning {
+  border-left-color: var(--x-needs);
+  background: var(--x-needs-bg);
+}
+.md__alert--warning .md__alert-title { color: var(--x-needs-text); }
+.md__alert--caution {
+  border-left-color: var(--x-failed);
+  background: var(--x-failed-bg);
+}
+.md__alert--caution .md__alert-title { color: var(--x-failed-text); }
 .md__code {
   margin: 0 0 6px; padding: 7px 9px; overflow-x: auto;
   background: var(--x-card); border: 1px solid var(--x-hairline);

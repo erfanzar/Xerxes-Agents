@@ -227,6 +227,8 @@ export interface AgentMember {
   /** Store-local identity: spawn call id + index, or the daemon snapshot id. */
   readonly key: string
   readonly runtimeId?: string
+  /** Antigravity background task id (`run_workflow`), tracked via Activity (`session.background`). */
+  readonly backgroundTaskId?: string
   readonly baseAgent?: string
   readonly prompt?: string
   readonly model?: string

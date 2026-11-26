@@ -8,7 +8,7 @@ import { TransportEventJournal, type TransportEventJournalOptions } from './tran
 import { EventSubscriptions } from './eventSubscriptions.js';
 import { WorkspaceObservationCalls } from './observationCalls.js';
 import type { ObservationHosts } from '../hub/supervisor/abilities/observations.js';
-import { historyLimit, sessionHistoryPage } from './historyPage.js';
+import { encodeHistoryCursor, historyLimit, sessionHistoryPage } from './historyPage.js';
 import { ArchiveHistory, type ArchivedHistory } from './archiveHistory.js';
 import { isCompactionSummaryMessage } from '../context/compressor.js';
 import { ValidationError } from '../core/errors.js';
@@ -601,9 +601,18 @@ export const CONCURRENT_DISPATCH_METHODS: ReadonlySet<string> = new Set([
   "artifacts.read",
   "artifacts.pin",
   "artifacts.update",
+  "git.branch",
+  "git.branches",
+  "git.diff",
   "git.fetch",
+  "git.log",
   "git.pull",
   "git.push",
+  "git.show",
+  "git.status",
+  "workspace.diff",
+  "workspace.filePreview",
+  "session.list",
   "fetch_models",
   "forge.inspect",
   "forge.list",
@@ -1670,6 +1679,10 @@ export class DaemonServer {
   >();
   /** Coalesces concurrent in-flight `refreshSkills()` calls per registry and root set. */
   private readonly skillRefreshesInFlight = new WeakMap<SkillRegistry, Map<string, Promise<void>>>();
+  /** Timestamp of the last completed skill scan per registry and root set (used for fast chat-switch TTL). */
+  private readonly skillRefreshCompletedAt = new WeakMap<SkillRegistry, Map<string, number>>();
+  /** Memoized resume-repair notice by `<path>\0<mtimeMs>\0<size>` so switching chats never re-scans or re-parses disk. */
+  private readonly resumeRepairCache = new Map<string, string | null>();
   private readonly skillDirectory: string;
   private readonly machineSettingsPath: string;
   private readonly artifactStore: ArtifactStore;
@@ -8922,6 +8935,7 @@ export class DaemonServer {
 
   private async refreshSkills(
     session: DaemonSession | undefined,
+    options?: { readonly maxAgeMs?: number },
   ): Promise<void> {
     const registry = this.skillRegistry;
     const roots =
@@ -8930,18 +8944,32 @@ export class DaemonServer {
         cwd: session?.cwd ?? process.cwd(),
         userSkillsDirectory: this.skillDirectory,
       });
+    const cacheKey = roots.join("\u0000");
+    const maxAgeMs = options?.maxAgeMs ?? 0;
+    if (maxAgeMs > 0) {
+      const completedAt = this.skillRefreshCompletedAt.get(registry)?.get(cacheKey);
+      if (completedAt !== undefined && Date.now() - completedAt < maxAgeMs) {
+        return;
+      }
+    }
     let byRoots = this.skillRefreshesInFlight.get(registry);
     if (!byRoots) {
       byRoots = new Map<string, Promise<void>>();
       this.skillRefreshesInFlight.set(registry, byRoots);
     }
-    const cacheKey = roots.join("\u0000");
     const existing = byRoots.get(cacheKey);
     if (existing) {
       await existing;
       return;
     }
-    const pending: Promise<void> = registry.refresh(...roots).then(() => undefined).finally(() => {
+    const pending: Promise<void> = registry.refresh(...roots).then(() => {
+      let timestamps = this.skillRefreshCompletedAt.get(registry);
+      if (!timestamps) {
+        timestamps = new Map<string, number>();
+        this.skillRefreshCompletedAt.set(registry, timestamps);
+      }
+      timestamps.set(cacheKey, Date.now());
+    }).finally(() => {
       if (byRoots.get(cacheKey) === pending) {
         byRoots.delete(cacheKey);
       }
@@ -12288,16 +12316,42 @@ export class DaemonServer {
     connection: DaemonTransportConnection,
     sessionId: string,
   ): Promise<void> {
-    const saved = await this.runtime.listSavedSessions();
-    const path = saved.find((candidate) => candidate.id === sessionId)?.path;
+    let path: string | undefined;
+    let fileStat: { readonly mtimeMs: number; readonly size: number } | undefined;
+    if (looksLikeSessionId(sessionId)) {
+      const directPath = join(this.sessionArchiveDirectory, `${sessionId}.json`);
+      const info = await stat(directPath).catch(() => undefined);
+      if (info?.isFile()) {
+        path = directPath;
+        fileStat = info;
+      }
+    }
     if (!path) {
-      return;
+      const saved = await this.runtime.listSavedSessions();
+      path = saved.find((candidate) => candidate.id === sessionId)?.path;
+      if (!path) {
+        return;
+      }
+      const info = await stat(path).catch(() => undefined);
+      if (info?.isFile()) fileStat = info;
     }
-    const raw: unknown = JSON.parse(await readFile(path, "utf8")) as unknown;
-    if (!isRecord(raw) || !Array.isArray(raw.messages)) {
-      return;
+    const cacheKey = fileStat ? `${path}\u0000${fileStat.mtimeMs}\u0000${fileStat.size}` : undefined;
+    let line: string | null | undefined = cacheKey ? this.resumeRepairCache.get(cacheKey) : undefined;
+    if (line === undefined) {
+      const raw: unknown = JSON.parse(await readFile(path, "utf8")) as unknown;
+      if (!isRecord(raw) || !Array.isArray(raw.messages)) {
+        line = null;
+      } else {
+        line = describeTranscriptRepair(summarizeTranscriptRepair(raw.messages)) || null;
+      }
+      if (cacheKey) {
+        if (this.resumeRepairCache.size >= 256) {
+          const oldest = this.resumeRepairCache.keys().next().value;
+          if (oldest !== undefined) this.resumeRepairCache.delete(oldest);
+        }
+        this.resumeRepairCache.set(cacheKey, line);
+      }
     }
-    const line = describeTranscriptRepair(summarizeTranscriptRepair(raw.messages));
     if (line) {
       this.emitSlash(connection, line, "warning");
     }
@@ -13418,7 +13472,9 @@ export class DaemonServer {
       liveAcpBinding && liveAcpBinding.connected && liveAcpBinding.transport !== "native",
     );
     if (!externalAcpActive) {
-      await this.refreshSkills(session);
+      // Reuse a recent skill scan (10 s) on chat switches within the same workspace;
+      // explicit `/reload` and `/skills` still force a full filesystem re-scan.
+      await this.refreshSkills(session, { maxAgeMs: 10_000 });
     }
     const skills = externalAcpActive
       ? []
@@ -19472,8 +19528,35 @@ function replayExecutionPayload(exec: unknown): unknown {
 /**
  * Current git branch of `dir` — null outside a work tree, on a detached
  * HEAD, or whenever git fails/times out. Never fabricates a name.
+ * Fast-paths `.git/HEAD` (and worktree `.git` gitdir pointer) directly to avoid
+ * spawning a `git` subprocess on every chat switch over SSH.
  */
 export async function gitBranch(dir: string): Promise<string | null> {
+  const parseHead = (raw: string): string | null | undefined => {
+    const trimmed = raw.trim();
+    if (trimmed.startsWith("ref: refs/heads/")) {
+      return trimmed.slice("ref: refs/heads/".length).trim() || null;
+    }
+    if (/^[0-9a-f]{40,64}$/i.test(trimmed)) return null;
+    return undefined;
+  };
+  try {
+    const dotGit = join(dir, ".git");
+    const info = await stat(dotGit);
+    if (info.isDirectory()) {
+      const parsed = parseHead(await readFile(join(dotGit, "HEAD"), "utf8"));
+      if (parsed !== undefined) return parsed;
+    } else if (info.isFile()) {
+      const pointer = (await readFile(dotGit, "utf8")).trim();
+      if (pointer.startsWith("gitdir:")) {
+        const gitDir = resolve(dir, pointer.slice("gitdir:".length).trim());
+        const parsed = parseHead(await readFile(join(gitDir, "HEAD"), "utf8"));
+        if (parsed !== undefined) return parsed;
+      }
+    }
+  } catch {
+    // Subdirectory or non-repo: fall through to git CLI.
+  }
   try {
     const proc = Bun.spawn(
       ["git", "-C", dir, "rev-parse", "--abbrev-ref", "HEAD"],
@@ -19484,9 +19567,7 @@ export async function gitBranch(dir: string): Promise<string | null> {
       const out = await new Response(proc.stdout).text();
       await proc.exited;
       const branch = out.trim();
-      return proc.exitCode === 0 && branch && branch !== "HEAD"
-        ? branch
-        : null;
+      return proc.exitCode === 0 && branch && branch !== "HEAD" ? branch : null;
     } finally {
       clearTimeout(timer);
     }
@@ -19495,15 +19576,87 @@ export async function gitBranch(dir: string): Promise<string | null> {
   }
 }
 
+const MAX_HISTORY_TOOL_RESULT_WIRE_BYTES = 64 * 1024;
+const MAX_HISTORY_TOOL_ARGS_WIRE_BYTES = 128 * 1024;
+const MAX_HISTORY_PAGE_WIRE_BYTES = 4 * 1024 * 1024;
+
+function truncateHistoryWireText(text: string, maxBytes: number): string {
+  const totalBytes = Buffer.byteLength(text, "utf8");
+  if (totalBytes <= maxBytes) return text;
+  const omittedKb = Math.max(1, Math.round((totalBytes - maxBytes) / 1024));
+  const headChars = Math.max(256, Math.floor(maxBytes * 0.6));
+  const tailChars = Math.max(256, Math.floor(maxBytes * 0.25));
+  if (text.length <= headChars + tailChars + 64) return text;
+  return `${text.slice(0, headChars)}\n… [truncated ${omittedKb} KB in history preview] …\n${text.slice(-tailChars)}`;
+}
+
+function compactHistoryWireMessage(message: DaemonTranscriptMessage): DaemonTranscriptMessage {
+  const isTool = message.role === "tool";
+  let nextContent = message.content;
+  if (isTool && typeof nextContent === "string" && Buffer.byteLength(nextContent, "utf8") > MAX_HISTORY_TOOL_RESULT_WIRE_BYTES) {
+    nextContent = truncateHistoryWireText(nextContent, MAX_HISTORY_TOOL_RESULT_WIRE_BYTES);
+  } else if (isTool && Array.isArray(nextContent)) {
+    nextContent = nextContent.map(part => {
+      if (isRecord(part) && part.type === "text" && typeof part.text === "string" && Buffer.byteLength(part.text, "utf8") > MAX_HISTORY_TOOL_RESULT_WIRE_BYTES) {
+        return { ...part, text: truncateHistoryWireText(part.text, MAX_HISTORY_TOOL_RESULT_WIRE_BYTES) };
+      }
+      return part;
+    });
+  }
+  let nextToolCalls = message.tool_calls;
+  if (Array.isArray(nextToolCalls)) {
+    nextToolCalls = nextToolCalls.map(call => {
+      if (!isRecord(call) || !isRecord(call.function)) return call;
+      const args = call.function.arguments;
+      if (typeof args === "string" && Buffer.byteLength(args, "utf8") > MAX_HISTORY_TOOL_ARGS_WIRE_BYTES) {
+        return { ...call, function: { ...call.function, arguments: truncateHistoryWireText(args, MAX_HISTORY_TOOL_ARGS_WIRE_BYTES) } };
+      }
+      return call;
+    });
+  }
+  if (nextContent === message.content && nextToolCalls === message.tool_calls) return message;
+  return {
+    ...message,
+    content: nextContent,
+    ...(nextToolCalls !== undefined ? { tool_calls: nextToolCalls } : {}),
+  };
+}
+
 function projectedHistoryPage(session: DaemonSession, limit: number, before?: unknown) {
   const page = sessionHistoryPage(session, limit, before);
   const projection = projectTranscriptForPayload(page.actions.flatMap(action => action.messages));
   let offset = 0;
-  return { ...page, actions: page.actions.map(action => {
-    const messages = projection.messages.slice(offset, offset + action.messages.length);
+  const projectedActions = page.actions.map(action => {
+    const messages = projection.messages
+      .slice(offset, offset + action.messages.length)
+      .map(compactHistoryWireMessage);
     offset += action.messages.length;
     return { ...action, messages, executions: action.executions.map(replayExecutionPayload) };
-  }) };
+  });
+  // Keep every history page well below the 16 MiB socket output cap so large
+  // remote sessions never stall SSH or trigger an infinite reconnect loop.
+  let keptStart = 0;
+  let totalWireBytes = 0;
+  for (let i = projectedActions.length - 1; i >= 0; i -= 1) {
+    const actionBytes = Buffer.byteLength(JSON.stringify(projectedActions[i]), "utf8");
+    if (totalWireBytes + actionBytes > MAX_HISTORY_PAGE_WIRE_BYTES && i < projectedActions.length - 1) {
+      keptStart = i + 1;
+      break;
+    }
+    totalWireBytes += actionBytes;
+  }
+  const finalStart = page.start + keptStart;
+  const finalActions = keptStart > 0 ? projectedActions.slice(keptStart) : projectedActions;
+  const finalHasMore = finalStart > 0;
+  const finalBefore = finalHasMore
+    ? (keptStart > 0 ? encodeHistoryCursor(session.id, finalStart, page.actions[keptStart]!) : page.before)
+    : null;
+  return {
+    actions: finalActions,
+    has_more: finalHasMore,
+    before: finalBefore,
+    total_actions: page.total_actions,
+  };
 }
 
 function sessionPayload(

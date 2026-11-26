@@ -85,6 +85,7 @@ export class DaemonRpc extends EventEmitter {
   private readonly deadlineMs: number
   private socket: Socket | null = null
   private buffer = ''
+  private scanOffset = 0
   private seq = 1
   private readonly waiters = new Map<number, Waiter>()
   private initializeWaiters = 0
@@ -290,6 +291,7 @@ export class DaemonRpc extends EventEmitter {
     this.socket = null
     socket?.destroy()
     this.buffer = ''
+    this.scanOffset = 0
     this.stderrRing = []
     this.failWaiters(new Error('connection disposed'))
     this.removeAllListeners()
@@ -424,6 +426,7 @@ export class DaemonRpc extends EventEmitter {
     this.socket = sock
     this.connectionLeaseAttached = false
     this.buffer = ''
+    this.scanOffset = 0
     this.attachedAt = Date.now()
     this.heardSinceAttach = false
     // Up to 16 concurrent provider.remote.request streams register once('close') alongside attach().
@@ -481,9 +484,10 @@ export class DaemonRpc extends EventEmitter {
       this.retries = 0
       this.silentCloses = 0
     }
-    this.buffer = this.buffer.length === 0 ? chunk : this.buffer + chunk
+    const previousLen = this.buffer.length
+    this.buffer = previousLen === 0 ? chunk : this.buffer + chunk
     let start = 0
-    let nl = this.buffer.indexOf('\n', start)
+    let nl = this.buffer.indexOf('\n', Math.max(start, this.scanOffset))
     while (nl !== -1) {
       const line = this.buffer.slice(start, nl)
       start = nl + 1
@@ -494,6 +498,7 @@ export class DaemonRpc extends EventEmitter {
       if (line.trim()) this.onFrame(line)
       if (this.stopped) {
         this.buffer = ''
+        this.scanOffset = 0
         return
       }
       nl = this.buffer.indexOf('\n', start)
@@ -509,11 +514,13 @@ export class DaemonRpc extends EventEmitter {
           : remainder
       }
     }
+    this.scanOffset = this.buffer.length
     if (this.exceedsFrameLimit(this.buffer)) this.breakOversized()
   }
 
   private breakOversized(): void {
     this.buffer = ''
+    this.scanOffset = 0
     this.emit('protocol_error', {
       message: `gateway frame exceeds maximum size of ${MAX_FRAME_BYTES} bytes`,
     })

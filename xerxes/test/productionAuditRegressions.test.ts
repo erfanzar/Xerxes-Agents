@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { describe, expect, test } from 'bun:test'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { connect, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -13,7 +13,7 @@ import { DaemonAcpBridgeHost } from '../src/daemon/acpBridgeHost.js'
 import { ConnectionLeases } from '../src/daemon/connectionLease.js'
 import { LOCAL_PROVIDER_BINDING, RemoteProviderBindings } from '../src/daemon/remoteProviderBindings.js'
 import { InMemoryDaemonRuntime } from '../src/daemon/runtime.js'
-import { DaemonServer } from '../src/daemon/server.js'
+import { DaemonServer, gitBranch } from '../src/daemon/server.js'
 import type { DaemonTransportConnection } from '../src/daemon/transport.js'
 import type { JsonRpcPayload } from '../src/protocol/jsonRpc.js'
 import { sameRemote } from '../src/desktop/main/contextNavigation.js'
@@ -808,5 +808,207 @@ describe('Production audit regressions — Desktop Store', () => {
       expect(snap.question).toBeNull()
       expect(snap.turnActive).toBe(false)
     })
+  })
+})
+
+describe('SSH & remote performance regressions — wire history budget & direct git HEAD', () => {
+  test('DaemonServer caps oversized tool outputs and >4 MiB history pages with a valid before cursor, and reads .git/HEAD directly', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'xrx-ssh-perf-'))
+    const repoDir = join(dir, 'repo')
+    const worktreeDir = join(dir, 'wt')
+    const gitCommonDir = join(repoDir, '.git')
+    const wtGitDir = join(gitCommonDir, 'worktrees', 'wt')
+    await mkdir(wtGitDir, { recursive: true })
+    await mkdir(worktreeDir, { recursive: true })
+    await writeFile(join(gitCommonDir, 'HEAD'), 'ref: refs/heads/feature/fast-ssh\n')
+    await writeFile(join(wtGitDir, 'HEAD'), 'ref: refs/heads/worktree-branch\n')
+    await writeFile(join(worktreeDir, '.git'), `gitdir: ${wtGitDir}\n`)
+
+    const socketPath = join(dir, 'daemon.sock')
+    const runtime = new InMemoryDaemonRuntime()
+    const server = new DaemonServer({
+      runtime,
+      socketPath,
+      projectDirectory: repoDir,
+    })
+
+    let socket: Socket | undefined
+    const pending = new Map<number, (frame: Record<string, unknown>) => void>()
+    let nextId = 0
+    const callRpc = async (method: string, params: JsonRpcPayload = {}): Promise<JsonRpcPayload> => {
+      const id = ++nextId
+      return await new Promise<JsonRpcPayload>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pending.delete(id)
+          reject(new Error(`RPC ${method} timed out`))
+        }, 5_000)
+        pending.set(id, frame => {
+          clearTimeout(timer)
+          if (frame.error) reject(new Error(JSON.stringify(frame.error)))
+          else resolve((frame.result as JsonRpcPayload) ?? {})
+        })
+        socket!.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`)
+      })
+    }
+
+    try {
+      await server.start()
+      socket = await new Promise<Socket>((resolve, reject) => {
+        const conn = connect(socketPath)
+        conn.once('connect', () => resolve(conn))
+        conn.once('error', reject)
+      })
+      socket.setEncoding('utf8')
+      let buf = ''
+      socket.on('data', (chunk: string) => {
+        buf += chunk
+        for (let nl = buf.indexOf('\n'); nl >= 0; nl = buf.indexOf('\n')) {
+          const line = buf.slice(0, nl).trim()
+          buf = buf.slice(nl + 1)
+          if (!line) continue
+          const frame = JSON.parse(line) as Record<string, unknown>
+          if (typeof frame.id === 'number') {
+            const waiter = pending.get(frame.id)
+            if (waiter) {
+              pending.delete(frame.id)
+              waiter(frame)
+            }
+          }
+        }
+      })
+
+      // 1. Direct .git/HEAD fast path works for both standard repos and linked worktrees, and reflects branch changes immediately.
+      expect(await gitBranch(repoDir)).toBe('feature/fast-ssh')
+      expect(await gitBranch(worktreeDir)).toBe('worktree-branch')
+      const repoBranch = await callRpc('git.branch', {})
+      expect(repoBranch.branch).toBe('feature/fast-ssh')
+      await writeFile(join(gitCommonDir, 'HEAD'), 'ref: refs/heads/main\n')
+      const updatedBranch = await callRpc('git.branch', {})
+      expect(updatedBranch.branch).toBe('main')
+
+      // 2. Wire history page truncates huge tool results and enforces <= 4 MiB wire page budget with valid re-anchored `before` cursor.
+      const init = await callRpc('initialize', { session_key: 'heavy-session', project_dir: repoDir })
+      const sessionId = String(init.session_id)
+      const session = runtime.listSessions().find(s => s.id === sessionId)!
+      const bigTool = 'HEAD-MARKER ' + 'x'.repeat(180_000) + ' TAIL-MARKER'
+      const bigAssistant = 'A'.repeat(220_000)
+      for (let idx = 0; idx < 28; idx += 1) {
+        session.messages.push({ role: 'user', content: `turn ${idx}` })
+        session.messages.push({ role: 'tool', content: bigTool, name: 'RunCommand', tool_call_id: `tc-${idx}` } as never)
+        session.messages.push({ role: 'assistant', content: `reply ${idx}: ${bigAssistant}` })
+      }
+
+      const latestResp = await callRpc('session.history', { session_key: 'heavy-session', history_limit: 80 })
+      const latestPage = latestResp.history as {
+        actions: Array<{ messages: Array<{ role?: string; content?: string }> }>
+        has_more: boolean
+        before: string | null
+      }
+      const actions = latestPage.actions
+      expect(latestPage.has_more).toBe(true)
+      expect(typeof latestPage.before).toBe('string')
+      expect(Buffer.byteLength(JSON.stringify(actions), 'utf8')).toBeLessThanOrEqual(4 * 1024 * 1024)
+      const latestMessages = actions.flatMap(a => a.messages)
+      const toolAction = latestMessages.find(m => m.role === 'tool')
+      expect(toolAction).toBeDefined()
+      expect(toolAction?.content?.length ?? 0).toBeLessThan(70_000)
+      expect(toolAction?.content).toContain('HEAD-MARKER')
+      expect(toolAction?.content).toContain('TAIL-MARKER')
+      expect(toolAction?.content).toContain('in history preview')
+      // Stored session message on disk/memory stays completely untouched.
+      expect(String(session.messages[1]?.content ?? '').length).toBe(bigTool.length)
+
+      // Re-anchored `before` cursor pages cleanly to earlier actions without error or duplication.
+      const olderResp = await callRpc('session.history', { session_key: 'heavy-session', before: latestPage.before, history_limit: 40 })
+      const olderPage = olderResp.history as { actions: Array<{ messages: Array<{ role?: string; content?: string }> }> }
+      expect(olderPage.actions.length).toBeGreaterThan(0)
+      expect(olderPage.actions.flatMap(a => a.messages).some(m => m.content === 'turn 0')).toBe(true)
+    } finally {
+      socket?.destroy()
+      await server.stop()
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('run_workflow settles synchronous results, labels background tasks in Activity, and completes on background_changed', async () => {
+    const handlers = new Set<(event: DaemonEvent) => void>()
+    let bgState: 'running' | 'completed' = 'running'
+    const bridge = {
+      call: async (method: string) => {
+        if (method === 'initialize') {
+          return {
+            ok: true,
+            session_id: 's-wf',
+            cwd: '/repo',
+            model: 'opus',
+            connection_lease_supported: true,
+            session: { id: 's-wf', key: 'k-wf', cwd: '/repo', status: 'idle', messages: [], history: { actions: [], before: null, has_more: false } },
+          }
+        }
+        if (method === 'session.background') {
+          return {
+            ok: true,
+            items: [{ id: 'agy-task:conv-1/task-3269', rawTaskId: 'conv-1/task-3269', state: bgState, outputPreview: 'Wired 61 families cleanly.' }],
+          }
+        }
+        return { ok: true }
+      },
+      subscribe: (handler: (event: DaemonEvent) => void) => {
+        handlers.add(handler)
+        return () => handlers.delete(handler)
+      },
+      push: (type: string, payload: Record<string, unknown> = {}) => {
+        for (const handler of handlers) handler({ type, payload })
+      },
+    }
+    const prev = (globalThis as { window?: unknown }).window
+    ;(globalThis as { window?: unknown }).window = {
+      xerxes: { onEvent: (handler: (event: DaemonEvent) => void) => bridge.subscribe(handler) },
+    }
+    try {
+      const store = new Store()
+      store.start(bridge as never)
+      await Bun.sleep(20)
+      bridge.push('turn_begin', { session_id: 's-wf', text: 'run workflows' })
+
+      // 1. Backgrounded run_workflow sets Activity label instead of stuck on Starting.
+      bridge.push('tool_call', { session_id: 's-wf', id: 'wf-bg', name: 'run_workflow', arguments: JSON.stringify({ Description: 'Wire 61 families' }) })
+      bridge.push('tool_result', {
+        session_id: 's-wf',
+        id: 'wf-bg',
+        name: 'run_workflow',
+        return_value: 'Tool is running as a background task with task id: conv-1/task-3269',
+      })
+      const getMembers = () => store.getSnapshot().blocks.find(b => b.kind === 'agents')?.members ?? []
+      expect(getMembers().find(m => m.key === 'wf-bg:0')).toMatchObject({
+        status: 'working',
+        backgroundTaskId: 'conv-1/task-3269',
+        activity: 'Running in Activity (task-3269)',
+      })
+
+      // 2. Synchronous run_workflow settles immediately to completed.
+      bridge.push('tool_call', { session_id: 's-wf', id: 'wf-sync', name: 'run_workflow', arguments: JSON.stringify({ Description: 'Quick sync check' }) })
+      bridge.push('tool_result', {
+        session_id: 's-wf',
+        id: 'wf-sync',
+        name: 'run_workflow',
+        return_value: 'All 5 checks passed',
+      })
+      expect(getMembers().find(m => m.key === 'wf-sync:0')).toMatchObject({
+        status: 'completed',
+        summary: 'All 5 checks passed',
+      })
+
+      // 3. background_changed settles the backgrounded workflow when Activity finishes.
+      bgState = 'completed'
+      bridge.push('background_changed', { session_id: 's-wf' })
+      await Bun.sleep(25)
+      expect(getMembers().find(m => m.key === 'wf-bg:0')).toMatchObject({
+        status: 'completed',
+        summary: 'Wired 61 families cleanly.',
+      })
+    } finally {
+      ;(globalThis as { window?: unknown }).window = prev
+    }
   })
 })

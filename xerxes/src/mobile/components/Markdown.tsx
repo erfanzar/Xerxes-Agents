@@ -12,8 +12,16 @@
 import type { ReactElement } from 'react'
 import { Fragment, memo } from 'react'
 
-// Emphasis needs a boundary on both sides, so globs and paths (`src/**/*.ts`, `a*b*c`) stay literal.
-const INLINE_RE = /(`[^`\n]+`)|((?<![\w*/\\])\*\*(?=[^\s*])[^*\n]*[^\s*]\*\*(?![\w*]))|((?<![\w*/\\])\*(?=[^\s*])(?:[^*\n]*[^\s*])?\*(?![\w*/]))|(\[[^\]\n]+\]\([^)\s]*\))/g
+// Emphasis needs a boundary on both sides, so globs and paths (`src/**/*.ts`, `a*b*c`) and snake_case stay literal.
+const INLINE_RE = /(`[^`\n]+`)|((?<![\w*/\\])\*\*(?=[^\s*])[^*\n]*[^\s*]\*\*(?![\w*])|(?<![\w])__(?=[^\s_])[^_\n]*[^\s_]__(?![\w]))|((?<![\w*/\\])\*(?=[^\s*])(?:[^*\n]*[^\s*])?\*(?![\w*])|(?<![\w])_(?=[^\s_])(?:[^_\n]*[^\s_])?_(?![\w]))|(~~(?=[^\s~])(?:[^~\n]*[^\s~])?~~)|(\[[^\]\n]+\]\([^)\s]*\))/g
+const GFM_ALERT_RE = /^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\](?:\s+(.*))?$/i
+const GFM_ALERT_LABELS: Readonly<Record<'note' | 'tip' | 'important' | 'warning' | 'caution', string>> = {
+  note: 'Note',
+  tip: 'Tip',
+  important: 'Important',
+  warning: 'Warning',
+  caution: 'Caution',
+}
 // The info string may hold anything after the language (`ts title="a b"`); a backtick fence's info has no backtick.
 const FENCE_OPEN = /^\s*(```+|~~~+)\s*([^\s`]*)(.*)$/
 const FENCE_CLOSE = /^\s*(```+|~~~+)\s*$/
@@ -51,10 +59,11 @@ export function inlinePieces(text: string): ReactElement[] {
   for (const match of text.matchAll(INLINE_RE)) {
     const start = match.index ?? 0
     if (start > last) pieces.push(<Fragment key={key++}>{text.slice(last, start)}</Fragment>)
-    const [raw, code, bold, italic, link] = match
+    const [raw, code, bold, italic, strike, link] = match
     if (code) pieces.push(<code key={key++}>{code.slice(1, -1)}</code>)
     else if (bold) pieces.push(<strong key={key++}>{bold.slice(2, -2)}</strong>)
     else if (italic) pieces.push(<em key={key++}>{italic.slice(1, -1)}</em>)
+    else if (strike) pieces.push(<del key={key++}>{strike.slice(2, -2)}</del>)
     else if (link) {
       const parsed = /^\[([^\]]+)\]\(([^)\s]*)\)$/.exec(link)
       const label = parsed?.[1] ?? raw
@@ -118,16 +127,30 @@ function splitRow(line: string): string[] {
   return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(cell => cell.trim())
 }
 
+function parseTableAlign(divider: string): ReadonlyArray<'left' | 'center' | 'right' | undefined> {
+  return splitRow(divider).map(cell => {
+    const trimmed = cell.trim()
+    const left = trimmed.startsWith(':')
+    const right = trimmed.endsWith(':')
+    if (left && right) return 'center'
+    if (right) return 'right'
+    if (left) return 'left'
+    return undefined
+  })
+}
+
 function isTableStart(line: string, next: string | undefined): boolean {
-  return line.trimStart().startsWith('|') && next !== undefined && TABLE_DIVIDER.test(next)
+  return line.includes('|') && next !== undefined && TABLE_DIVIDER.test(next)
 }
 
 function startsBlock(line: string, next: string | undefined): boolean {
   return fenceOpen(line) !== undefined || HEADING.test(line) || HR.test(line) || LIST.test(line) || QUOTE.test(line) || isTableStart(line, next)
 }
 
+const MAX_QUOTE_DEPTH = 6
+
 /** Fold markdown into display blocks: headings, lists, code, tables, quotes, paragraphs. */
-export function markdownBlocks(markdown: string): ReactElement[] {
+export function markdownBlocks(markdown: string, depth = 0): ReactElement[] {
   const lines = markdown.replace(/\r\n?/g, '\n').split('\n')
   const out: ReactElement[] = []
   let key = 0
@@ -163,14 +186,15 @@ export function markdownBlocks(markdown: string): ReactElement[] {
 
     if (isTableStart(line, lines[i + 1])) {
       const head = splitRow(line)
+      const aligns = parseTableAlign(lines[i + 1]!)
       const rows: string[][] = []
       let j = i + 2
-      while (j < lines.length && lines[j]!.trimStart().startsWith('|')) rows.push(splitRow(lines[j++]!))
+      while (j < lines.length && lines[j]!.trim() !== '' && lines[j]!.includes('|')) rows.push(splitRow(lines[j++]!))
       out.push(
         <div key={key++} className="md-table" role="region" aria-label="Table" tabIndex={0}>
           <table>
-            <thead><tr>{head.map((cell, c) => <th key={c}>{inlinePieces(cell)}</th>)}</tr></thead>
-            <tbody>{rows.map((row, r) => <tr key={r}>{row.map((cell, c) => <td key={c}>{inlinePieces(cell)}</td>)}</tr>)}</tbody>
+            <thead><tr>{head.map((cell, c) => <th key={c} style={aligns[c] ? { textAlign: aligns[c] } : undefined}>{inlinePieces(cell)}</th>)}</tr></thead>
+            <tbody>{rows.map((row, r) => <tr key={r}>{row.map((cell, c) => <td key={c} style={aligns[c] ? { textAlign: aligns[c] } : undefined}>{inlinePieces(cell)}</td>)}</tr>)}</tbody>
           </table>
         </div>,
       )
@@ -186,7 +210,26 @@ export function markdownBlocks(markdown: string): ReactElement[] {
         if (!more) break
         quoted.push(more[1] ?? '')
       }
-      out.push(<blockquote key={key++}>{markdownBlocks(quoted.join('\n'))}</blockquote>)
+      const firstNonEmpty = quoted.findIndex(entry => entry.trim() !== '')
+      const alert = firstNonEmpty >= 0 ? GFM_ALERT_RE.exec(quoted[firstNonEmpty]!.trim()) : null
+      if (alert) {
+        const kind = alert[1]!.toLowerCase() as keyof typeof GFM_ALERT_LABELS
+        const trailing = (alert[2] ?? '').trim()
+        const body = [...(trailing ? [trailing] : []), ...quoted.slice(firstNonEmpty + 1)].join('\n').trim()
+        const alertChildren = body
+          ? (depth < MAX_QUOTE_DEPTH ? markdownBlocks(body, depth + 1) : [<p key={0}>{inlinePieces(body)}</p>])
+          : null
+        out.push(
+          <aside key={key++} className={`md-alert md-alert--${kind}`} role="note" data-alert={kind}>
+            <p className="md-alert-title">{GFM_ALERT_LABELS[kind]}</p>
+            {alertChildren ? <div className="md-alert-body">{alertChildren}</div> : null}
+          </aside>,
+        )
+      } else {
+        const quoteBody = quoted.join('\n')
+        const quoteChildren = depth < MAX_QUOTE_DEPTH ? markdownBlocks(quoteBody, depth + 1) : [<p key={0}>{inlinePieces(quoteBody)}</p>]
+        out.push(<blockquote key={key++}>{quoteChildren}</blockquote>)
+      }
       i = j
       continue
     }

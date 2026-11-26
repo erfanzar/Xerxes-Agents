@@ -145,3 +145,74 @@ test('mixed inline list content shares one text flow beside its marker', () => {
   expect(html).toContain('<span class="md__item"><strong>Capture</strong> the diff with <code>git diff</code> and read it.</span>')
   expect(html).toContain('<span class="md__item">Keep <em>all</em> text together.</span>')
 })
+
+test('GFM alerts render styled callouts with nested lists and preserve snake_case identifiers', () => {
+  const sample = [
+    '> [!IMPORTANT] **Verified GCS Checkpoints (`commit_success.json` present):**',
+    '> - `K=2` (`exp1_channel`): `gs://modelbucket/qwen3_5/run-100/`',
+    '> - `K=3` (`exp2_k3_channel`): `gs://modelbucket/qwen3_5/run-100/` (plus midpoint `run-50/`)',
+  ].join('\n')
+  const html = render(sample)
+  expect(html).toContain('class="md__alert md__alert--important"')
+  expect(html).toContain('role="note"')
+  expect(html).toContain('data-alert="important"')
+  expect(html).toContain('<span>Important</span>')
+  expect(html).not.toContain('[!IMPORTANT]')
+  expect(html).toContain('<ul>')
+  expect(html.match(/<li/g)).toHaveLength(2)
+  expect(html).toContain('<code>commit_success.json</code>')
+  expect(html).toContain('<code>exp1_channel</code>')
+  expect(html).not.toContain('<em>')
+
+  for (const [tag, label] of [
+    ['NOTE', 'Note'],
+    ['TIP', 'Tip'],
+    ['WARNING', 'Warning'],
+    ['CAUTION', 'Caution'],
+  ] as const) {
+    const alertHtml = render(`> [!${tag}]\n> Details for **${label}**.`)
+    expect(alertHtml).toContain(`md__alert--${tag.toLowerCase()}`)
+    expect(alertHtml).toContain(`<span>${label}</span>`)
+    expect(alertHtml).toContain(`<strong>${label}</strong>`)
+  }
+})
+
+test('blockquotes render nested blocks, lists, and code instead of flattening lines', () => {
+  const html = render('> First paragraph\n>\n> - item one\n> - item two\n>\n> ```ts\n> const x = 1\n> ```')
+  expect(html).toContain('<blockquote>')
+  expect(html).toContain('<p>First paragraph</p>')
+  expect(html).toContain('<ul>')
+  expect(html).toContain('item one')
+  expect(html).toContain('item two')
+  expect(html).toContain('md__code')
+})
+
+test('GFM inline syntax, nested lists, table column alignments, and hard breaks work cleanly', () => {
+  const html = render([
+    'Compare ~~old~~ with ***both***, __strong__, _emph_, and snake_case_ident.',
+    '',
+    'Line one  ',
+    'Line two\\',
+    'Line three',
+    '',
+    '+ Parent item',
+    '  - Nested child',
+    '',
+    'Metric | Count | Share',
+    ':--- | :---: | ---:',
+    'Runs | 12 | 98%',
+  ].join('\n'))
+
+  expect(html).toContain('<del>old</del>')
+  expect(html).toContain('<strong><em>both</em></strong>')
+  expect(html).toContain('<strong>strong</strong>')
+  expect(html).toContain('<em>emph</em>')
+  expect(html).toContain('snake_case_ident')
+  expect(html).not.toContain('<em>case</em>')
+  expect(html).toContain('Line one<br/>Line two<br/>Line three')
+  expect(html).toContain('<span class="md__item">Parent item<ul><li><span class="md__item">Nested child</span></li></ul></span>')
+  expect(html).toContain('<th style="text-align:left">Metric</th>')
+  expect(html).toContain('<th style="text-align:center">Count</th>')
+  expect(html).toContain('<th style="text-align:right">Share</th>')
+  expect(html).toContain('<td style="text-align:right">98%</td>')
+})

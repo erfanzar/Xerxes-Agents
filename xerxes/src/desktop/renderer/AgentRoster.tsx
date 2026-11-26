@@ -68,8 +68,8 @@ export function activityFleetRows(rows: readonly SessionRow[], blocks: readonly 
       continue
     }
     index({ id: member.key, title: member.title } as SessionRow, result.length)
-    result.push({id:member.key,key:member.key,title:member.title,status:member.status === 'working' ? 'starting' : member.status,age:'',current:false,kind:'subagent',turns:0,messages:0,cwd:'',untitled:false,
-      agentDetails:{provisional:true,baseAgent:member.baseAgent || "",goal:member.prompt || "",summary:agentState(member.status).priority < 2 ? 'The spawn request is visible in the conversation. Waiting for the runtime to report this agent’s identity and state.' : 'This request has finished. Its runtime details were not recorded; the original request is retained.',error:member.error || '',model:member.model || '',providerProfile:member.providerProfile || '',filesRead:[],filesWritten:[]}})
+    result.push({id:member.key,key:member.key,title:member.title,status:member.status === 'working' ? (member.backgroundTaskId ? 'running' : 'starting') : member.status,age:'',current:false,kind:'subagent',turns:0,messages:0,cwd:'',untitled:false,
+      agentDetails:{provisional:true,baseAgent:member.baseAgent || "",goal:member.prompt || "",summary:member.summary || (agentState(member.status).priority < 2 ? 'The spawn request is visible in the conversation. Waiting for the runtime to report this agent’s identity and state.' : 'This request has finished. Its runtime details were not recorded; the original request is retained.'),error:member.error || '',model:member.model || '',providerProfile:member.providerProfile || '',filesRead:[],filesWritten:[]}})
     }
   }
   return result

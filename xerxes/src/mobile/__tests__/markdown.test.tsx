@@ -54,4 +54,27 @@ describe('phone markdown', () => {
   it('renders an unclosed fence (streaming) as code', () => {
     expect(html('```\npartial')).toContain('<pre class="md-code"><code>partial</code></pre>')
   })
+
+  it('renders GFM alerts, strikethrough, underscore emphasis safely, and table alignments', () => {
+    const out = html([
+      '> [!IMPORTANT] **Verified GCS Checkpoints (`commit_success.json`):**',
+      '> - `K=2` (`exp1_channel`): ~~stale~~ _fresh_ __ok__',
+      '',
+      'Name | Value',
+      ':--- | ---:',
+      'foo_bar_baz | 42',
+    ].join('\n'))
+    expect(out).toContain('class="md-alert md-alert--important"')
+    expect(out).toContain('<p class="md-alert-title">Important</p>')
+    expect(out).not.toContain('[!IMPORTANT]')
+    expect(out).toContain('<ul><li><code>K=2</code>')
+    expect(out).toContain('<del>stale</del>')
+    expect(out).toContain('<em>fresh</em>')
+    expect(out).toContain('<strong>ok</strong>')
+    expect(out).toContain('foo_bar_baz')
+    expect(out).not.toContain('<em>bar</em>')
+    expect(out).toContain('<th style="text-align:left">Name</th>')
+    expect(out).toContain('<th style="text-align:right">Value</th>')
+    expect(out).toContain('<td style="text-align:right">42</td>')
+  })
 })

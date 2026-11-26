@@ -201,7 +201,7 @@ export function AgentInspector({ row, sessionKey, online }: {row: SessionRow; ro
         {!online && <p role="status" className="agent-transcript__note">Disconnected. Showing what was loaded so far; reconnect for updates and controls.</p>}
         {history.kind === 'unsupported' && detail && <p className="agent-transcript__note">This runtime keeps only a summary of this agent’s work. Update the runtime to follow every step.</p>}
         {history.kind === 'unavailable' && <p className="agent-transcript__note">{history.note}</p>}
-        {info?.provisional && <p role="status" className="agent-transcript__note">{state.tone === 'failed' && info.error ? 'The spawn request failed before an agent identity was confirmed. No running agent is reported for this request.' : state.priority < 2 ? 'Waiting for the runtime to identify this spawn request.' : 'This request has finished. Its runtime identity was not recorded.'}</p>}
+        {info?.provisional && <p role="status" className="agent-transcript__note">{state.tone === 'failed' && info.error ? (/workflow/i.test(info.error) ? 'The workflow script failed during execution. Inspect the error output below.' : 'The spawn request failed before an agent identity was confirmed. No running agent is reported for this request.') : state.priority < 2 ? (info.summary && /Background workflow/i.test(info.summary) ? 'This workflow is running as a background task. Open Activity to watch its live output and logs.' : 'Waiting for the runtime to identify this spawn request.') : 'This request has finished. Its runtime identity was not recorded.'}</p>}
         {page && (page.more || older.error) && <div className="history-pager">
           <button type="button" className="btn" disabled={older.loading} onClick={() => void scroll.loadOlder()}>{older.loading ? 'Loading earlier activity…' : older.error ? 'Retry loading earlier activity' : 'Show earlier activity'}</button>
           {older.error && <p role="alert">{older.error}</p>}
@@ -223,8 +223,8 @@ export function AgentInspector({ row, sessionKey, online }: {row: SessionRow; ro
     </div>
     {info?.provisional
       ? <div className="agent-dock agent-dock--readonly composer-wrap" role="note"><div className="composer-dock"><p>
-          <strong>{state.tone === 'failed' ? 'This request did not start an agent.' : state.priority < 2 ? 'Not controllable yet.' : 'Read-only.'}</strong>{' '}
-          {state.tone !== 'failed' && state.priority < 2 ? 'Message and stop appear once the runtime confirms this agent.' : 'No runtime identity was recorded, so it cannot be messaged or retried.'}
+          <strong>{state.tone === 'failed' ? (/workflow/i.test(info.error || '') ? 'Workflow execution failed.' : 'This request did not start an agent.') : state.priority < 2 ? (info.summary && /Background workflow/i.test(info.summary) ? 'Running in Activity.' : 'Not controllable yet.') : 'Read-only.'}</strong>{' '}
+          {state.tone === 'failed' && /workflow/i.test(info.error || '') ? 'The failure came from the workflow script itself; the agent can fix and re-run it.' : state.priority < 2 && info.summary && /Background workflow/i.test(info.summary) ? 'Open Activity to view logs or cancel this background workflow.' : state.tone !== 'failed' && state.priority < 2 ? 'Message and stop appear once the runtime confirms this agent.' : 'No runtime identity was recorded, so it cannot be messaged or retried.'}
         </p></div></div>
       : <AgentDock key={row.id} id={row.id} title={row.title} active={active} online={online} />}
   </section>

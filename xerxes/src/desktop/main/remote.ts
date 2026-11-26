@@ -217,6 +217,8 @@ export async function openRemote(
         '-N',
         '-T',
         '-o',
+        'Compression=yes',
+        '-o',
         'ExitOnForwardFailure=yes',
         '-L',
         `${socketPath}:${address.socketPath}`,

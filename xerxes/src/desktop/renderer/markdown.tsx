@@ -88,19 +88,29 @@ export function looksLikeFilePath(text: string): boolean {
   return dot > 0 && dot > text.lastIndexOf('/') + 1 && FILE_EXTENSIONS.has(text.slice(dot + 1).toLowerCase())
 }
 
-// swarm-board hint | code | image `![alt](src "title")` | bold | italic | link `[label](href "title")` | math `$x^2$` / `\(x\)`
+// swarm-board hint | code | image | bold+italic | bold | italic | strikethrough | link | math
 // Inline math needs a non-space right after the opening `$` and right before
 // the closing one, and no word character after it, so prices ("$5 and $10")
 // and shell variables ("$HOME/$USER", "$PATH:$HOME") stay text.
+// Underscore emphasis requires non-word boundaries so snake_case identifiers stay literal.
 const INLINE_RE = new RegExp(
-  `(${SWARM_BOARD_SENTENCE_RE.source})|(\`[^\`]+\`)|(!\\[[^\\]]*\\]\\([^)\\s]+(?:\\s+"[^"]*")?\\))|(\\*\\*[^*]+\\*\\*)|(\\*[^*\\s][^*]*\\*)|(\\[[^\\]]+\\]\\([^)\\s]*(?:\\s+"[^"]*")?\\))|(\\$[^\\s$](?:[^$\\n]*[^\\s$])?\\$(?!\\w)|\\\\\\([^\\n]+?\\\\\\))`,
+  `(${SWARM_BOARD_SENTENCE_RE.source})`
+  + `|(\`[^\`]+\`)`
+  + `|(!\\[[^\\]]*\\]\\([^)\\s]+(?:\\s+"[^"]*")?\\))`
+  + `|(\\*\\*\\*[^*\\n]+\\*\\*\\*)`
+  + `|(\\*\\*[^*]+\\*\\*|(?<![\\w])__[^_\\s](?:[^_\\n]*[^_\\s])?__(?![\\w]))`
+  + `|(\\*[^*\\s][^*]*\\*|(?<![\\w])_[^_\\s](?:[^_\\n]*[^_\\s])?_(?![\\w]))`
+  + `|(~~[^~\\s](?:[^~\\n]*[^~\\s])?~~)`
+  + `|(\\[[^\\]]+\\]\\([^)\\s]*(?:\\s+"[^"]*")?\\))`
+  + `|(\\$[^\\s$](?:[^$\\n]*[^\\s$])?\\$(?!\\w)|\\\\\\([^\\n]+?\\\\\\))`,
   'gi',
 )
 const IMAGE_RE = /^!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)$/
 const LINK_RE = /^\[([^\]]+)\]\(([^)\s]*)(?:\s+"[^"]*")?\)$/
+const LINK_LABEL_FORMAT_RE = /[`*_~$\\]/
 
 /**
- * Split one line into swarm hint / code / image / bold / italic / link / plain spans.
+ * Split one line into swarm hint / code / image / bold / italic / strikethrough / link / plain spans.
  * Links open through the host (chatLinks.tsx); bare URLs and `/swarm board` hints
  * in plain text become links too, never inside fenced code.
  */
@@ -113,7 +123,7 @@ function inlinePieces(line: string, bareUrls = true): ReactElement[] {
   for (const match of line.matchAll(INLINE_RE)) {
     const start = match.index ?? 0
     if (start > last) plain(line.slice(last, start))
-    const [raw, swarmHint, code, image, bold, italic, link, math] = match
+    const [raw, swarmHint, code, image, boldItalic, bold, italic, strike, link, math] = match
     if (swarmHint) {
       pieces.push(<ChatLink key={key++} label="Open Immortals →" href="sidecar://immortals/board" />)
     }
@@ -137,17 +147,101 @@ function inlinePieces(line: string, bareUrls = true): ReactElement[] {
     }
     // Emphasis holds code and markdown links too (**`out/summary.csv`** is
     // bold code that opens the file); a bare URL in it stays text, as before.
+    else if (boldItalic) pieces.push(<strong key={key++}><em>{inlinePieces(boldItalic.slice(3, -3), false)}</em></strong>)
     else if (bold) pieces.push(<strong key={key++}>{inlinePieces(bold.slice(2, -2), false)}</strong>)
     else if (italic) pieces.push(<em key={key++}>{inlinePieces(italic.slice(1, -1), false)}</em>)
+    else if (strike) pieces.push(<del key={key++}>{inlinePieces(strike.slice(2, -2), false)}</del>)
     else if (link) {
       const parsed = LINK_RE.exec(link)
-      if (parsed) pieces.push(<ChatLink key={key++} label={parsed[1] ?? ''} href={parsed[2] ?? ''} />)
+      if (parsed) {
+        const rawLabel = parsed[1] ?? ''
+        const label: ReactNode = LINK_LABEL_FORMAT_RE.test(rawLabel) ? inlinePieces(rawLabel, false) : rawLabel
+        pieces.push(<ChatLink key={key++} label={label} href={parsed[2] ?? ''} />)
+      }
       else plain(raw)
     }
     last = start + raw.length
   }
   if (last < line.length) plain(line.slice(last))
   return pieces
+}
+
+type GfmAlertKind = 'note' | 'tip' | 'important' | 'warning' | 'caution'
+const GFM_ALERT_RE = /^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\](?:\s+(.*))?$/i
+const GFM_ALERTS: Readonly<Record<GfmAlertKind, { readonly label: string; readonly icon: 'info' | 'spark' | 'warning' | 'error' }>> = {
+  note: { label: 'Note', icon: 'info' },
+  tip: { label: 'Tip', icon: 'spark' },
+  important: { label: 'Important', icon: 'info' },
+  warning: { label: 'Warning', icon: 'warning' },
+  caution: { label: 'Caution', icon: 'error' },
+}
+const MAX_QUOTE_DEPTH = 6
+
+function parseTableAlignments(divider: string): Array<'left' | 'center' | 'right' | undefined> {
+  return splitRow(divider).map(cell => {
+    const trimmed = cell.trim()
+    if (/^:-+:$/.test(trimmed)) return 'center'
+    if (/^-+:$/.test(trimmed)) return 'right'
+    if (/^:-+$/.test(trimmed)) return 'left'
+    return undefined
+  })
+}
+
+function isTableHeaderPair(line: string, next: string | undefined): boolean {
+  if (!next || !line.includes('|') || !next.includes('|')) return false
+  return TABLE_DIVIDER_RE.test(next)
+}
+
+interface DesktopListLine {
+  readonly indent: number
+  readonly ordered: boolean
+  readonly start: number
+  readonly checked: boolean | null
+  text: string
+}
+
+interface DesktopListNode {
+  readonly line: DesktopListLine
+  readonly children: DesktopListNode[]
+}
+
+function nestDesktopList(lines: readonly DesktopListLine[]): DesktopListNode[] {
+  const roots: DesktopListNode[] = []
+  const stack: DesktopListNode[] = []
+  for (const line of lines) {
+    const node: DesktopListNode = { line, children: [] }
+    while (stack.length > 0 && stack.at(-1)!.line.indent >= line.indent) stack.pop()
+    const parent = stack.at(-1)
+    if (parent) parent.children.push(node)
+    else roots.push(node)
+    stack.push(node)
+  }
+  return roots
+}
+
+function renderDesktopListNodes(nodes: readonly DesktopListNode[], keyPrefix: string): ReactElement {
+  const first = nodes[0]
+  const items = nodes.map((node, index) => (
+    <li key={index} className={node.line.checked === null ? undefined : 'md__check'}>
+      {node.line.checked === null ? null : (
+        <span className={`md__box${node.line.checked ? ' is-done' : ''}`}>
+          {node.line.checked ? <Icon name="check" size={11} /> : null}
+        </span>
+      )}
+      <span className="md__item">
+        {inlinePieces(node.line.text)}
+        {node.children.length > 0 ? renderDesktopListNodes(node.children, `${keyPrefix}-${index}`) : null}
+      </span>
+    </li>
+  ))
+  if (first?.line.ordered) {
+    return (
+      <ol key={keyPrefix} start={first.line.start !== 1 ? first.line.start : undefined}>
+        {items}
+      </ol>
+    )
+  }
+  return <ul key={keyPrefix}>{items}</ul>
 }
 
 const FENCE_RE = /^\s*(```+|~~~+)\s*(\S*)(?:\s+(.*?))?\s*$/
@@ -390,9 +484,9 @@ export function markdownCacheSize(): number {
   return markdownBlockCache.size
 }
 
-/** Fold markdown text into display blocks (headings / lists / code / tables / paragraphs). */
-export function markdownBlocks(markdown: string, prefix = 'md', cacheable = true, streaming = false): ReactElement[] {
-  const canCache = cacheable && !streaming && prefix === 'md' && markdown.length > 0 && markdown.length <= MARKDOWN_CACHE_MAX_CHARS
+/** Fold markdown text into display blocks (headings / lists / code / tables / quotes / alerts / paragraphs). */
+export function markdownBlocks(markdown: string, prefix = 'md', cacheable = true, streaming = false, depth = 0): ReactElement[] {
+  const canCache = cacheable && !streaming && depth === 0 && prefix === 'md' && markdown.length > 0 && markdown.length <= MARKDOWN_CACHE_MAX_CHARS
   if (canCache) {
     const cached = markdownBlockCache.get(markdown)
     if (cached) {
@@ -402,41 +496,38 @@ export function markdownBlocks(markdown: string, prefix = 'md', cacheable = true
       return cached
     }
   }
-  const lines = markdown.split('\n')
+  const lines = markdown.replace(/\r\n?/g, '\n').split('\n')
   const out: ReactElement[] = []
-  let paragraph: string[] = []
-  let list: Array<{ text: string; checked: boolean | null }> = []
-  let listKind: 'ul' | 'ol' | null = null
-  let listStart = 1
+  let paragraph: Array<{ readonly text: string; readonly hardBreak: boolean }> = []
+  let list: DesktopListLine[] = []
   let key = 0
 
   const flushParagraph = (): void => {
     if (paragraph.length) {
-      out.push(<p key={`${prefix}-p${key++}`}>{inlinePieces(paragraph.join(' '))}</p>)
+      const nodes: ReactNode[] = []
+      paragraph.forEach((entry, idx) => {
+        if (idx > 0) {
+          nodes.push(paragraph[idx - 1]!.hardBreak ? <br key={`br-${idx}`} /> : ' ')
+        }
+        nodes.push(<Fragment key={`seg-${idx}`}>{inlinePieces(entry.text)}</Fragment>)
+      })
+      out.push(<p key={`${prefix}-p${key++}`}>{nodes}</p>)
       paragraph = []
     }
   }
   const flushList = (): void => {
     if (list.length) {
-      const items = list.map((item, index) => (
-        <li key={index} className={item.checked === null ? undefined : 'md__check'}>
-          {item.checked === null ? null : <span className={`md__box${item.checked ? ' is-done' : ''}`}>{item.checked ? <Icon name="check" size={11} /> : null}</span>}
-          <span className="md__item">{inlinePieces(item.text)}</span>
-        </li>
-      ))
-      if (listKind === 'ol') {
-        out.push(
-          <ol key={`${prefix}-o${key++}`} start={listStart !== 1 ? listStart : undefined}>
-            {items}
-          </ol>,
-        )
-      } else {
-        out.push(<ul key={`${prefix}-l${key++}`}>{items}</ul>)
+      const groups: DesktopListNode[][] = []
+      for (const root of nestDesktopList(list)) {
+        const lastGroup = groups.at(-1)
+        if (lastGroup && lastGroup[0]!.line.ordered === root.line.ordered) lastGroup.push(root)
+        else groups.push([root])
+      }
+      for (const group of groups) {
+        out.push(renderDesktopListNodes(group, `${prefix}-l${key++}`))
       }
       list = []
     }
-    listKind = null
-    listStart = 1
   }
   const flushAll = (): void => {
     flushParagraph()
@@ -531,25 +622,30 @@ export function markdownBlocks(markdown: string, prefix = 'md', cacheable = true
       }
     }
 
-    // Table: a pipe row followed by a divider row. Cells carry inline spans.
-    if (line.trimStart().startsWith('|') && i + 1 < lines.length && TABLE_DIVIDER_RE.test(lines[i + 1] ?? '')) {
+    // Table: a GFM pipe row followed by a divider row (with optional column alignment).
+    if (isTableHeaderPair(line, lines[i + 1])) {
       flushAll()
+      const alignments = parseTableAlignments(lines[i + 1] ?? '')
       const rows: TableRow[] = [{ cells: splitRow(line), header: true }]
       let j = i + 2
       for (; j < lines.length; j++) {
         const row = lines[j] ?? ''
-        if (!row.trimStart().startsWith('|')) break
+        if (!row.trim() || !row.includes('|')) break
         rows.push({ cells: splitRow(row), header: false })
       }
       const head = rows[0]?.cells ?? []
+      const alignStyle = (col: number): { readonly textAlign: 'left' | 'center' | 'right' } | undefined => {
+        const align = alignments[col]
+        return align ? { textAlign: align } : undefined
+      }
       out.push(
         <div key={`${prefix}-t${key++}`} className="md__table-scroll" role="region" aria-label="Table contents" tabIndex={0}><table className="md__table">
           <thead>
-            <tr>{head.map((cell, ci) => <th key={ci}>{inlinePieces(cell)}</th>)}</tr>
+            <tr>{head.map((cell, ci) => <th key={ci} style={alignStyle(ci)}>{inlinePieces(cell)}</th>)}</tr>
           </thead>
           <tbody>
             {rows.slice(1).map((row, ri) => (
-              <tr key={ri}>{row.cells.map((cell, ci) => <td key={ci}>{inlinePieces(cell)}</td>)}</tr>
+              <tr key={ri}>{row.cells.map((cell, ci) => <td key={ci} style={alignStyle(ci)}>{inlinePieces(cell)}</td>)}</tr>
             ))}
           </tbody>
         </table></div>,
@@ -559,9 +655,9 @@ export function markdownBlocks(markdown: string, prefix = 'md', cacheable = true
     }
 
     const heading = /^\s*(#{1,6})\s+(.+?)\s*#*\s*$/.exec(line)
-    const check = /^\s*[-*]\s+\[([ xX])]\s*(.*)$/.exec(line)
-    const bullet = /^\s*[-*]\s+(.*)$/.exec(line)
-    const ordered = /^\s*(\d+)[.)]\s+(.*)$/.exec(line)
+    const check = /^(\s*)[-*+]\s+\[([ xX])]\s*(.*)$/.exec(line)
+    const bullet = /^(\s*)[-*+]\s+(.*)$/.exec(line)
+    const ordered = /^(\s*)(\d+)[.)]\s+(.*)$/.exec(line)
     const quote = /^\s*>\s?(.*)$/.exec(line)
     if (heading) {
       flushAll()
@@ -580,36 +676,82 @@ export function markdownBlocks(markdown: string, prefix = 'md', cacheable = true
         if (!more) break
         quoted.push(more[1] ?? '')
       }
-      out.push(
-        <blockquote key={`${prefix}-q${key++}`}>
-          <p>{inlinePieces(quoted.join(' '))}</p>
-        </blockquote>,
-      )
+      const firstNonEmptyIdx = quoted.findIndex(entry => entry.trim() !== '')
+      const alertMatch = firstNonEmptyIdx >= 0 ? GFM_ALERT_RE.exec(quoted[firstNonEmptyIdx]!.trim()) : null
+      if (alertMatch) {
+        const kind = alertMatch[1]!.toLowerCase() as GfmAlertKind
+        const meta = GFM_ALERTS[kind]
+        const trailing = (alertMatch[2] ?? '').trim()
+        const restLines = [
+          ...(trailing ? [trailing] : []),
+          ...quoted.slice(firstNonEmptyIdx + 1),
+        ]
+        const bodyMd = restLines.join('\n').trim()
+        const alertKey = `${prefix}-a${key++}`
+        out.push(
+          <aside key={alertKey} className={`md__alert md__alert--${kind}`} role="note" data-alert={kind}>
+            <p className="md__alert-title">
+              <Icon name={meta.icon} size={14} />
+              <span>{meta.label}</span>
+            </p>
+            {bodyMd ? (
+              <div className="md__alert-body">
+                {depth < MAX_QUOTE_DEPTH
+                  ? markdownBlocks(bodyMd, `${alertKey}-b`, false, streaming, depth + 1)
+                  : <p>{inlinePieces(bodyMd)}</p>}
+              </div>
+            ) : null}
+          </aside>,
+        )
+      } else {
+        const quoteKey = `${prefix}-q${key++}`
+        const quoteBody = quoted.join('\n')
+        out.push(
+          <blockquote key={quoteKey}>
+            {depth < MAX_QUOTE_DEPTH
+              ? markdownBlocks(quoteBody, `${quoteKey}-b`, false, streaming, depth + 1)
+              : <p>{inlinePieces(quoted.join(' '))}</p>}
+          </blockquote>,
+        )
+      }
       i = j - 1
       continue
     } else if (check) {
       flushParagraph()
-      if (listKind === 'ol') flushList()
-      listKind = 'ul'
-      list.push({ text: check[2]!, checked: check[1]!.toLowerCase() === 'x' })
+      list.push({
+        indent: check[1]!.replace(/\t/g, '    ').length,
+        ordered: false,
+        start: 1,
+        text: check[3]!,
+        checked: check[2]!.toLowerCase() === 'x',
+      })
     } else if (bullet) {
       flushParagraph()
-      if (listKind === 'ol') flushList()
-      listKind = 'ul'
-      list.push({ text: bullet[1]!, checked: null })
+      list.push({
+        indent: bullet[1]!.replace(/\t/g, '    ').length,
+        ordered: false,
+        start: 1,
+        text: bullet[2]!,
+        checked: null,
+      })
     } else if (ordered) {
       flushParagraph()
-      if (listKind === 'ul') flushList()
-      if (listKind === null) {
-        listKind = 'ol'
-        listStart = Number.parseInt(ordered[1]!, 10) || 1
-      }
-      list.push({ text: ordered[2]!, checked: null })
+      list.push({
+        indent: ordered[1]!.replace(/\t/g, '    ').length,
+        ordered: true,
+        start: Number.parseInt(ordered[2]!, 10) || 1,
+        text: ordered[3]!,
+        checked: null,
+      })
     } else if (!line.trim()) {
       flushAll()
+    } else if (list.length > 0 && /^\s+\S/.test(line)) {
+      list[list.length - 1]!.text = `${list[list.length - 1]!.text} ${line.trim()}`
     } else {
       flushList()
-      paragraph.push(line.trim())
+      const hardBreak = /  +$/.test(line) || /\\$/.test(line.trimEnd())
+      const cleaned = hardBreak ? line.trimEnd().replace(/\\$/, '').trim() : line.trim()
+      paragraph.push({ text: cleaned, hardBreak })
     }
   }
   flushAll()
