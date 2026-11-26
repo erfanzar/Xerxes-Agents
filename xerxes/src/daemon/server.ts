@@ -1578,6 +1578,8 @@ export class DaemonServer {
   >();
   /** Serializes compaction and turn admission for each session. */
   private readonly sessionOperations = new SessionOperationQueue();
+  /** Sessions currently executing `acp.import_session` (pinned against empty-shell reaping). */
+  private readonly importingSessionIds = new Set<string>();
   private readonly goalWakeDispatches = new Map<string, Promise<void>>();
   private readonly disconnectedGoalOwners = new WeakSet<DaemonTransportConnection>();
   /** Consecutive goal rounds lost to transient provider failures, per session. */
@@ -15124,6 +15126,7 @@ export class DaemonServer {
    */
   private isSessionPinnedForEviction(session: DaemonSession): boolean {
     if (session.activeTurnId || session.status !== "idle") return true;
+    if (this.importingSessionIds.has(session.id)) return true;
     if (this.sessionOperations.has(session.sessionKey)) return true;
     for (const raw of [...this.connections, ...this.sessionObservers]) {
       const owner = this.connectionLeases.owner(raw);
@@ -16412,130 +16415,164 @@ export class DaemonServer {
       externalSessionId,
       ...(source ? { source } : {}),
     });
-    const requestedCwd = optionalString(params.cwd)?.trim() || loaded?.cwd || activeSession?.cwd || this.projectDirectory || process.cwd();
-    const cwd = resolveProjectDirectory(requestedCwd);
+    const fallbackCwd = activeSession?.cwd || this.projectDirectory || process.cwd();
+    const candidateCwd = optionalString(params.cwd)?.trim() || loaded?.cwd || fallbackCwd;
+    const cwd = resolveProjectDirectory(existsSync(candidateCwd) ? candidateCwd : fallbackCwd);
     const newSlotKey = `import-${runtimeId}-${crypto.randomUUID().slice(0, 8)}`;
     const session = await this.runtime.openSession(newSlotKey, undefined, { cwd, preserveProject: true });
-    const shouldConnect = params.connect !== false;
+    // Pin against empty-shell reaping (e.g. a concurrent background probe disconnect)
+    // across the entire `acpBridgeHost.connect` await!
+    this.importingSessionIds.add(session.id);
+    try {
+      const shouldConnect = params.connect !== false;
 
-    const { agents } = this.acpBridgeHost.listAgents(session.id);
-    const agentInfo = agents.find((a) => a.id === runtimeId);
-    const runtimeName = agentInfo?.name ?? runtimeId;
-    const provider = agentInfo?.provider ?? (
-      runtimeId === "antigravity"
-        ? "antigravity"
-        : runtimeId === "claude-code"
-          ? "claude-code"
-          : runtimeId === "codex"
-            ? "codex"
-            : "acp"
-    );
-    const command = optionalString(params.command)?.trim() || undefined;
+      const { agents } = this.acpBridgeHost.listAgents(session.id);
+      const agentInfo = agents.find((a) => a.id === runtimeId);
+      const runtimeName = agentInfo?.name ?? runtimeId;
+      const provider = agentInfo?.provider ?? (
+        runtimeId === "antigravity"
+          ? "antigravity"
+          : runtimeId === "claude-code"
+            ? "claude-code"
+            : runtimeId === "codex"
+              ? "codex"
+              : "acp"
+      );
+      const command = optionalString(params.command)?.trim() || undefined;
 
-    let connected = false;
-    let connectWarning: string | undefined;
-    let connectedBinding: AcpSessionBinding | undefined;
-    if (shouldConnect) {
-      const connectResult = await this.acpBridgeHost.connect({
-        sessionId: session.id,
-        agentId: runtimeId,
-        cwd,
-        resumeSessionId: externalSessionId,
-        ...(command ? { command } : {}),
-      });
-      if (connectResult.ok) {
-        connected = true;
-        connectedBinding = connectResult.binding;
-        if (loaded?.model && connectedBinding.current_model !== loaded.model) {
-          const switched = await this.acpBridgeHost.setModel(session.id, loaded.model);
-          if (switched.ok) connectedBinding = switched.binding;
-        }
-        if (loaded?.thoughtLevel && connectedBinding.thought_level !== loaded.thoughtLevel) {
-          const cfgId = connectedBinding.thought_level_config_id || "thought_level";
-          const switched = await this.acpBridgeHost.setConfigOption(session.id, cfgId, loaded.thoughtLevel);
-          if (switched.ok) connectedBinding = switched.binding;
-        }
-      } else {
-        connectWarning = connectResult.error;
+      const explicitTitle = optionalString(params.title)?.trim();
+      const resolvedTitle =
+        explicitTitle ||
+        loaded?.title ||
+        optionalString(session.metadata.title)?.trim() ||
+        `${runtimeName} ${externalSessionId.slice(0, 8)}`;
+
+      // Populate local history and import metadata BEFORE awaiting `acpBridgeHost.connect`
+      // so the session immediately has durable history and can never be treated as an empty shell.
+      if (loaded && loaded.messages.length > 0) {
+        session.messages.splice(0, session.messages.length, ...loaded.messages);
+        session.toolExecutions.splice(0, session.toolExecutions.length, ...loaded.toolExecutions);
+        session.thinkingContent.splice(0, session.thinkingContent.length, ...loaded.thinkingContent);
+        session.turnCount = loaded.turnCount;
       }
-    }
-
-    // If ACP `session/load` did not replay history directly into the session (e.g. zero-replay
-    // `session/resume`, `claude-stream-json`, `codex-exec-json`, or offline import), populate
-    // the full chronological transcript read-only from the runtime's local transcript store.
-    if (session.messages.length === 0 && loaded && loaded.messages.length > 0) {
-      session.messages.splice(0, session.messages.length, ...loaded.messages);
-      session.toolExecutions.splice(0, session.toolExecutions.length, ...loaded.toolExecutions);
-      session.thinkingContent.splice(0, session.thinkingContent.length, ...loaded.thinkingContent);
-      session.turnCount = loaded.turnCount;
-    }
-
-    if (session.messages.length === 0 && !connected) {
-      await this.runtime.removeSavedTranscript?.(session.id);
-      return {
-        ok: false,
-        error: connectWarning
-          ? `Could not import "${externalSessionId}" from ${runtimeName}: no local transcript found and runtime connection failed (${connectWarning}).`
-          : `No local transcript found for "${externalSessionId}" in ${runtimeName}.`,
+      session.metadata.title = resolvedTitle;
+      session.metadata.title_derived = true;
+      session.metadata.imported_from = {
+        runtime_id: runtimeId,
+        external_session_id: externalSessionId,
+        imported_at: new Date().toISOString(),
       };
-    }
+      const initialBinding: AcpSessionBinding = {
+        session_id: session.id,
+        agent_id: runtimeId,
+        name: runtimeName,
+        provider,
+        transport: agentInfo?.transport && agentInfo.transport !== "native" ? agentInfo.transport : "acp",
+        cwd,
+        external_session_id: externalSessionId,
+        connected: false,
+        ...(agentInfo?.command ? { command: agentInfo.command } : {}),
+        ...(loaded?.model ? { current_model: loaded.model, current_model_name: loaded.model } : {}),
+        ...(loaded?.thoughtLevel ? { thought_level: loaded.thoughtLevel } : {}),
+      };
+      session.metadata.acp_binding = initialBinding;
 
-    const explicitTitle = optionalString(params.title)?.trim();
-    const resolvedTitle =
-      explicitTitle ||
-      loaded?.title ||
-      optionalString(session.metadata.title)?.trim() ||
-      `${runtimeName} ${externalSessionId.slice(0, 8)}`;
-    session.metadata.title = resolvedTitle;
-    session.metadata.title_derived = true;
-    session.metadata.imported_from = {
-      runtime_id: runtimeId,
-      external_session_id: externalSessionId,
-      imported_at: new Date().toISOString(),
-    };
-    const bindingToPersist: AcpSessionBinding = connectedBinding ?? {
-      session_id: session.id,
-      agent_id: runtimeId,
-      name: runtimeName,
-      provider,
-      transport: agentInfo?.transport && agentInfo.transport !== "native" ? agentInfo.transport : "acp",
-      cwd,
-      external_session_id: externalSessionId,
-      connected: false,
-      ...(agentInfo?.command ? { command: agentInfo.command } : {}),
-      ...(loaded?.model ? { current_model: loaded.model, current_model_name: loaded.model } : {}),
-      ...(loaded?.thoughtLevel ? { thought_level: loaded.thoughtLevel } : {}),
-    };
-    session.metadata.acp_binding = bindingToPersist;
-    session.lastActive = Date.now();
-    await this.runtime.flushSessions("rewrite", session.sessionKey);
-
-    if (connected && connectedBinding) {
-      this.emitAcpStatus(session.id, connectedBinding, cwd);
-      if (isAntigravityBinding(connectedBinding)) {
-        this.ensureAgySwarmWatch(session);
+      let connected = false;
+      let connectWarning: string | undefined;
+      let connectedBinding: AcpSessionBinding | undefined;
+      if (shouldConnect) {
+        const connectResult = await this.acpBridgeHost.connect({
+          sessionId: session.id,
+          agentId: runtimeId,
+          cwd,
+          resumeSessionId: externalSessionId,
+          ...(command ? { command } : {}),
+        });
+        if (connectResult.ok) {
+          connected = true;
+          connectedBinding = connectResult.binding;
+          // Only apply model/thought overrides when the runtime explicitly advertises the
+          // option (or exposes no catalog). Antigravity `session/resume` already restores
+          // the native conversation model, and internal brain log IDs (e.g. `gemini-4-neon-xhigh`)
+          // can differ from ACP catalog IDs.
+          const advertisedModels = connectedBinding.models ?? [];
+          const canApplyLoadedModel = Boolean(
+            loaded?.model
+            && connectedBinding.current_model !== loaded.model
+            && (advertisedModels.length === 0 || advertisedModels.some((m) => m.id === loaded.model)),
+          );
+          if (canApplyLoadedModel && loaded?.model) {
+            const switched = await this.acpBridgeHost.setModel(session.id, loaded.model);
+            if (switched.ok) connectedBinding = switched.binding;
+          }
+          const advertisedEfforts = connectedBinding.thought_levels ?? [];
+          const canApplyLoadedEffort = Boolean(
+            loaded?.thoughtLevel
+            && connectedBinding.thought_level !== loaded.thoughtLevel
+            && (advertisedEfforts.length === 0 || advertisedEfforts.some((o) => o.id === loaded.thoughtLevel)),
+          );
+          if (canApplyLoadedEffort && loaded?.thoughtLevel) {
+            const cfgId = connectedBinding.thought_level_config_id || "thought_level";
+            const switched = await this.acpBridgeHost.setConfigOption(session.id, cfgId, loaded.thoughtLevel);
+            if (switched.ok) connectedBinding = switched.binding;
+          }
+          if (
+            connectedBinding.external_session_id
+            && connectedBinding.external_session_id !== externalSessionId
+          ) {
+            connectWarning = `${runtimeName} could not directly resume session ${externalSessionId.slice(0, 8)} and opened a fresh runtime context; imported history remains visible locally.`;
+          }
+        } else {
+          connectWarning = connectResult.error;
+        }
       }
-    }
-    this.notifySessionStateChanged(session.id);
 
-    return {
-      ok: true,
-      session_id: session.id,
-      session_key: session.sessionKey,
-      title: resolvedTitle,
-      cwd: session.cwd,
-      imported_messages: session.messages.length,
-      imported_turns: session.turnCount,
-      connected,
-      ...(connectWarning ? { warning: connectWarning } : {}),
-      session: this.sessionWirePayload(
-        session,
-        this.contextLimit(session.model, session),
-        this.mcpStatusRecord(session),
-        100,
-        session,
-      ),
-    };
+      if (session.messages.length === 0 && !connected) {
+        delete session.metadata.imported_from;
+        this.runtime.evictSession(session.sessionKey);
+        await this.runtime.removeSavedTranscript?.(session.id);
+        return {
+          ok: false,
+          error: connectWarning
+            ? `Could not import "${externalSessionId}" from ${runtimeName}: no local transcript found and runtime connection failed (${connectWarning}).`
+            : `No local transcript found for "${externalSessionId}" in ${runtimeName}.`,
+        };
+      }
+
+      const bindingToPersist: AcpSessionBinding = connectedBinding ?? initialBinding;
+      session.metadata.acp_binding = bindingToPersist;
+      session.lastActive = Date.now();
+      await this.runtime.flushSessions("rewrite", session.sessionKey);
+
+      if (connected && connectedBinding) {
+        this.emitAcpStatus(session.id, connectedBinding, cwd);
+        if (isAntigravityBinding(connectedBinding)) {
+          this.ensureAgySwarmWatch(session);
+        }
+      }
+      this.notifySessionStateChanged(session.id);
+
+      return {
+        ok: true,
+        session_id: session.id,
+        session_key: session.sessionKey,
+        title: resolvedTitle,
+        cwd: session.cwd,
+        imported_messages: session.messages.length,
+        imported_turns: session.turnCount,
+        connected,
+        ...(connectWarning ? { warning: connectWarning } : {}),
+        session: this.sessionWirePayload(
+          session,
+          this.contextLimit(session.model, session),
+          this.mcpStatusRecord(session),
+          100,
+          session,
+        ),
+      };
+    } finally {
+      this.importingSessionIds.delete(session.id);
+    }
   }
 
   private forwardSlashToExternalAcp(

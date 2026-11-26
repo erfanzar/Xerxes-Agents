@@ -1778,6 +1778,191 @@ describe('SSH & remote performance regressions — wire history budget & direct 
       const importableAfter = await callRpc('acp.importable_sessions', { cwd: repoDir, all_projects: true })
       const agyRow = (importableAfter.sessions as Array<{ id: string; already_imported?: boolean }>).find(s => s.id === agyId)
       expect(agyRow?.already_imported).toBe(true)
+
+      // Immediately resuming the imported session via `initialize({ resume_session_id })` MUST succeed
+      // (never failing with `saved conversation is missing`) and return the full imported transcript.
+      const resumed = await callRpc('initialize', {
+        project_dir: repoDir,
+        resume_session_id: imported.session_id,
+        history_limit: 100,
+      })
+      expect(resumed.ok).toBe(true)
+      expect((resumed.session as { id?: string; turn_count?: number } | undefined)?.id).toBe(String(imported.session_id))
+      expect((resumed.session as { turn_count?: number } | undefined)?.turn_count).toBe(1)
+
+      // Subagent transcripts (starting with SYSTEM_MESSAGE, no USER_EXPLICIT) must be excluded,
+      // while multi-turn transcripts spanning >24 KB must report accurate full-file turn & step counts.
+      const subagentId = 'subagent-0000-0000-0000-000000000001'
+      const subagentLogs = join(fakeHome, '.gemini', 'antigravity-cli', 'brain', subagentId, '.system_generated', 'logs')
+      await mkdir(subagentLogs, { recursive: true })
+      await writeFile(
+        join(subagentLogs, 'transcript.jsonl'),
+        [
+          JSON.stringify({ step_index: 0, source: 'SYSTEM', type: 'SYSTEM_MESSAGE', content: 'Subagent system prompt' }),
+          JSON.stringify({ step_index: 1, source: 'SUBAGENT', type: 'USER_INPUT', content: 'You are wiring LoopTransformerMixin...' }),
+          JSON.stringify({ step_index: 2, source: 'MODEL', type: 'PLANNER_RESPONSE', model: 'gemini-4-neon-xhigh', content: 'Done.' }),
+        ].join('\n') + '\n',
+      )
+
+      const bigId = '22222222-3333-4444-5555-666666666666'
+      const bigLogs = join(fakeHome, '.gemini', 'antigravity-cli', 'brain', bigId, '.system_generated', 'logs')
+      await mkdir(bigLogs, { recursive: true })
+      const padding = 'x'.repeat(16_000)
+      await writeFile(
+        join(bigLogs, 'transcript.jsonl'),
+        [
+          JSON.stringify({ step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', content: '<USER_REQUEST>\nTurn 1\n</USER_REQUEST>' }),
+          JSON.stringify({ step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', model: 'gemini-4-neon-xhigh', content: padding, tool_calls: [{ name: 'read_file', args: { Path: '"/tmp/train.py"' } }] }),
+          JSON.stringify({ step_index: 2, source: 'MODEL', type: 'GENERIC', content: padding }),
+          JSON.stringify({ step_index: 100, source: 'USER_EXPLICIT', type: 'USER_INPUT', content: '<USER_REQUEST>\nTurn 2\n</USER_REQUEST>' }),
+          JSON.stringify({ step_index: 200, source: 'USER_EXPLICIT', type: 'USER_INPUT', content: '<USER_REQUEST>\nTurn 3\n</USER_REQUEST>' }),
+          JSON.stringify({ step_index: 4119, source: 'USER_EXPLICIT', type: 'USER_INPUT', content: '<USER_REQUEST>\nTurn 4\n</USER_REQUEST>' }),
+          JSON.stringify({ step_index: 4120, source: 'MODEL', type: 'PLANNER_RESPONSE', model: 'gemini-4-neon-xhigh', content: 'All 4 turns done.' }),
+        ].join('\n') + '\n',
+      )
+
+      const listedBig = discoverImportableExternalSessions({ homeDir: fakeHome, cwd: repoDir, allProjects: true, runtime: 'antigravity' })
+      expect(listedBig.some(s => s.id === subagentId)).toBe(false)
+      const bigEntry = listedBig.find(s => s.id === bigId)
+      expect(bigEntry?.turn_count).toBe(4)
+      expect(bigEntry?.message_count).toBe(4121)
+
+      const bigLoaded = loadExternalSessionTranscript({ homeDir: fakeHome, runtimeId: 'antigravity', externalSessionId: bigId })
+      expect(bigLoaded?.turnCount).toBe(4)
+      expect((bigLoaded?.toolExecutions[0] as { inputs?: Record<string, unknown> } | undefined)?.inputs).toEqual({ Path: '/tmp/train.py' })
+    } finally {
+      process.env.HOME = prevHome
+      socket?.destroy()
+      await server.stop()
+      await rm(fakeHome, { recursive: true, force: true })
+    }
+  })
+
+  test('acp.import_session survives a concurrent probe disconnect without empty-shell eviction', async () => {
+    const fakeHome = await mkdtemp(join(tmpdir(), 'xerxes-import-race-'))
+    const repoDir = join(fakeHome, 'easydel-src')
+    const sessionsDir = join(fakeHome, 'sessions')
+    const socketPath = join(fakeHome, 'daemon.sock')
+    await mkdir(repoDir, { recursive: true })
+    await mkdir(sessionsDir, { recursive: true })
+
+    const agyId = '145a43d3-aaaa-bbbb-cccc-dddddddddddd'
+    const agyLogs = join(fakeHome, '.gemini', 'antigravity-cli', 'brain', agyId, '.system_generated', 'logs')
+    await mkdir(agyLogs, { recursive: true })
+    await writeFile(
+      join(agyLogs, 'transcript.jsonl'),
+      [
+        JSON.stringify({ step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', content: '<USER_REQUEST>\nResearch loop transformer\n</USER_REQUEST>' }),
+        JSON.stringify({ step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', model: 'gemini-4-neon-xhigh', content: 'Confirmed 1k step run.' }),
+      ].join('\n') + '\n',
+    )
+
+    const prevHome = process.env.HOME
+    process.env.HOME = fakeHome
+    const runtime = new InMemoryDaemonRuntime(undefined, {
+      model: 'native-default',
+      currentProjectDirectory: repoDir,
+      sessionDirectory: sessionsDir,
+    })
+    const server = new DaemonServer({ runtime, socketPath, projectDirectory: repoDir })
+    // Simulate a slow `acpBridgeHost.connect` during which a separate probe client disconnects
+    // and triggers the empty-shell reaper in `handleDisconnect`.
+    const bridgeHost = (server as unknown as {
+      acpBridgeHost: {
+        connect: (req: { sessionId: string; agentId: string; cwd: string; resumeSessionId?: string }) => Promise<unknown>
+      }
+    }).acpBridgeHost
+    let releaseConnect: (() => void) | undefined
+    let connectStartedResolve: (() => void) | undefined
+    const connectStarted = new Promise<void>(resolve => { connectStartedResolve = resolve })
+    bridgeHost.connect = async req => {
+      connectStartedResolve?.()
+      await new Promise<void>(resolve => { releaseConnect = resolve })
+      return {
+        ok: true,
+        binding: {
+          session_id: req.sessionId,
+          agent_id: req.agentId,
+          name: 'Antigravity',
+          provider: 'antigravity',
+          transport: 'acp',
+          cwd: req.cwd,
+          external_session_id: req.resumeSessionId ?? agyId,
+          connected: true,
+          current_model: 'MODEL_4_NEON',
+          models: [{ id: 'MODEL_4_NEON', name: 'Gemini 4 Neon' }],
+        },
+      }
+    }
+
+    let socket: Socket | undefined
+    const pending = new Map<number, (frame: Record<string, unknown>) => void>()
+    let nextId = 0
+    const callRpc = async (method: string, params: JsonRpcPayload = {}): Promise<JsonRpcPayload> => {
+      const id = ++nextId
+      return await new Promise<JsonRpcPayload>((resolve, reject) => {
+        const timer = setTimeout(() => { pending.delete(id); reject(new Error(`RPC ${method} timed out`)) }, 5_000)
+        pending.set(id, frame => {
+          clearTimeout(timer)
+          if (frame.error) reject(new Error(JSON.stringify(frame.error)))
+          else resolve((frame.result as JsonRpcPayload) ?? {})
+        })
+        socket!.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`)
+      })
+    }
+    try {
+      await server.start()
+      socket = await new Promise<Socket>((resolve, reject) => {
+        const conn = connect(socketPath)
+        conn.once('connect', () => resolve(conn))
+        conn.once('error', reject)
+      })
+      socket.setEncoding('utf8')
+      let buf = ''
+      socket.on('data', (chunk: string) => {
+        buf += chunk
+        for (let nl = buf.indexOf('\n'); nl >= 0; nl = buf.indexOf('\n')) {
+          const line = buf.slice(0, nl).trim()
+          buf = buf.slice(nl + 1)
+          if (!line) continue
+          const frame = JSON.parse(line) as Record<string, unknown>
+          if (typeof frame.id === 'number') {
+            const waiter = pending.get(frame.id)
+            if (waiter) { pending.delete(frame.id); waiter(frame) }
+          }
+        }
+      })
+
+      const importPromise = callRpc('acp.import_session', {
+        runtime_id: 'antigravity',
+        external_session_id: agyId,
+        cwd: repoDir,
+        connect: true,
+      })
+      await connectStarted
+
+      // Open and immediately close a probe connection while `acpBridgeHost.connect` is mid-flight.
+      const probe = await new Promise<Socket>((resolve, reject) => {
+        const conn = connect(socketPath)
+        conn.once('connect', () => resolve(conn))
+        conn.once('error', reject)
+      })
+      probe.destroy()
+      await new Promise(resolve => setTimeout(resolve, 60))
+
+      releaseConnect?.()
+      const imported = await importPromise
+      expect(imported.ok).toBe(true)
+      expect(imported.connected).toBe(true)
+
+      const resumed = await callRpc('initialize', {
+        project_dir: repoDir,
+        resume_session_id: imported.session_id,
+        history_limit: 100,
+      })
+      expect(resumed.ok).toBe(true)
+      expect((resumed.session as { id?: string; turn_count?: number } | undefined)?.id).toBe(String(imported.session_id))
+      expect((resumed.session as { turn_count?: number } | undefined)?.turn_count).toBe(1)
     } finally {
       process.env.HOME = prevHome
       socket?.destroy()

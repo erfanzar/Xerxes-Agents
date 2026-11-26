@@ -20,6 +20,8 @@ import type { DaemonSession } from './runtime.js'
 
 const VALID_SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 const MAX_SCAN_SLICE_BYTES = 24 * 1024
+const MAX_TURN_COUNT_SCAN_BYTES = 64 * 1024 * 1024
+const TURN_SCAN_CHUNK_BYTES = 256 * 1024
 const MAX_IMPORT_FILE_BYTES = 32 * 1024 * 1024
 const MAX_IMPORT_MESSAGES = 4_000
 const MAX_PREVIEW_CHARS = 160
@@ -241,6 +243,120 @@ function findAgyTranscriptFile(sessionDir: string): string | undefined {
   return undefined
 }
 
+/** Prefer compact `transcript.jsonl` for fast discovery/turn counting, falling back to `transcript_full.jsonl`. */
+function findAgyDiscoveryTranscriptFile(sessionDir: string): string | undefined {
+  const logsDir = join(sessionDir, '.system_generated', 'logs')
+  const compact = join(logsDir, 'transcript.jsonl')
+  if (existsSync(compact)) return compact
+  const full = join(logsDir, 'transcript_full.jsonl')
+  if (existsSync(full)) return full
+  return undefined
+}
+
+/**
+ * Stream a JSONL file in fixed-size byte chunks (up to `MAX_TURN_COUNT_SCAN_BYTES`)
+ * and count lines matching a cheap predicate. Avoids reading multi-megabyte transcripts
+ * into a single string or JSON-parsing every tool result while still computing exact turn counts.
+ */
+function countJsonlMatchingLines(
+  filePath: string,
+  matchesLine: (line: string) => boolean,
+  maxBytes = MAX_TURN_COUNT_SCAN_BYTES,
+): number | undefined {
+  let fd: number | undefined
+  try {
+    const st = statSync(filePath)
+    if (!st.isFile() || st.size === 0 || st.size > maxBytes) return undefined
+    fd = openSync(filePath, 'r')
+    const buf = Buffer.allocUnsafe(Math.min(TURN_SCAN_CHUNK_BYTES, st.size))
+    let leftover = ''
+    let count = 0
+    while (true) {
+      const n = readSync(fd, buf, 0, buf.length, null)
+      if (n <= 0) break
+      const text = leftover + buf.subarray(0, n).toString('utf8')
+      let start = 0
+      while (true) {
+        const nl = text.indexOf('\n', start)
+        if (nl < 0) {
+          leftover = text.slice(start)
+          break
+        }
+        const line = text.slice(start, nl)
+        if (line.length > 0 && matchesLine(line)) count += 1
+        start = nl + 1
+      }
+    }
+    if (leftover.length > 0 && matchesLine(leftover)) count += 1
+    return count
+  } catch {
+    return undefined
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd)
+      } catch {
+        // Ignore close errors.
+      }
+    }
+  }
+}
+
+function isAgyExplicitUserLine(line: string): boolean {
+  if (!line.includes('"USER_INPUT"')) return false
+  if (line.includes('"USER_EXPLICIT"')) return true
+  if (line.includes('"source":"USER"') || line.includes('"source": "USER"')) return true
+  // Bare USER_INPUT without a source field (legacy/minimal format).
+  return !line.includes('"source"')
+}
+
+function isClaudeRealUserLine(line: string): boolean {
+  if (!line.includes('"type":"user"') && !line.includes('"type": "user"')) return false
+  if (line.includes('"isMeta":true') || line.includes('"isMeta": true')) return false
+  if (line.includes('"isSidechain":true') || line.includes('"isSidechain": true')) return false
+  if (line.includes('"tool_result"')) return false
+  return true
+}
+
+function isCodexRealUserLine(line: string): boolean {
+  if (!line.includes('"response_item"') || !line.includes('"role":"user"')) {
+    if (!line.includes('"response_item"') || !line.includes('"role": "user"')) return false
+  }
+  if (
+    line.includes('# AGENTS.md instructions for ')
+    || line.includes('<environment_context>')
+    || line.includes('<permissions instructions>')
+    || line.includes('<INSTRUCTIONS>')
+    || line.includes('<collaboration_mode>')
+    || line.includes('<turn_aborted>')
+  ) {
+    return false
+  }
+  return true
+}
+
+function unwrapAgyArgValue(value: unknown): unknown {
+  if (typeof value !== 'string') return value
+  const trimmed = value.trim()
+  if (trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"')) {
+    try {
+      const parsed = JSON.parse(trimmed)
+      if (typeof parsed === 'string') return parsed
+    } catch {
+      // Keep original string.
+    }
+  }
+  return value
+}
+
+function normalizeAgyToolArgs(raw: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(raw)) {
+    out[k] = unwrapAgyArgValue(v)
+  }
+  return out
+}
+
 function discoverAntigravitySessions(homeDir: string): ExternalImportableSession[] {
   const byId = new Map<string, { readonly mtimeMs: number; readonly session: ExternalImportableSession }>()
   for (const { dir: rootDir, source } of agyBrainRoots(homeDir)) {
@@ -253,7 +369,7 @@ function discoverAntigravitySessions(homeDir: string): ExternalImportableSession
     for (const entry of entries) {
       if (!isSafeSessionId(entry)) continue
       const sessionDir = join(rootDir, entry)
-      const transcriptPath = findAgyTranscriptFile(sessionDir)
+      const transcriptPath = findAgyDiscoveryTranscriptFile(sessionDir)
       if (!transcriptPath) continue
       let st: ReturnType<typeof statSync>
       try {
@@ -269,10 +385,13 @@ function discoverAntigravitySessions(homeDir: string): ExternalImportableSession
 
       let firstUserText = ''
       let hasExplicitUser = false
+      let startsWithSystemStep = false
+      let sawFirstStep = false
       let detectedCwd = extractAgyCwdFromText(slice.head) ?? ''
       let detectedModel = ''
       let lastPreview = ''
       let headUserCount = 0
+      let maxStepIndex = -1
 
       for (const line of slice.head.split('\n')) {
         const trimmed = line.trim()
@@ -286,15 +405,27 @@ function discoverAntigravitySessions(homeDir: string): ExternalImportableSession
         if (!isRecord(parsed)) continue
         const stepType = typeof parsed.type === 'string' ? parsed.type : ''
         const stepSource = typeof parsed.source === 'string' ? parsed.source : ''
+        if (typeof parsed.step_index === 'number' && parsed.step_index > maxStepIndex) {
+          maxStepIndex = parsed.step_index
+        }
+        if (!sawFirstStep) {
+          sawFirstStep = true
+          if (stepType === 'SYSTEM_MESSAGE' || stepSource === 'SYSTEM') {
+            startsWithSystemStep = true
+          }
+        }
         if (stepType === 'USER_INPUT') {
-          if (stepSource === 'USER_EXPLICIT') hasExplicitUser = true
-          const content = typeof parsed.content === 'string' ? parsed.content : ''
-          if (!detectedCwd) detectedCwd = extractAgyCwdFromText(content) ?? ''
-          const cleaned = cleanAgyUserPromptText(content)
-          if (cleaned) {
-            headUserCount += 1
-            if (!firstUserText) firstUserText = cleaned
-            lastPreview = cleaned
+          const isExplicit = !stepSource || stepSource === 'USER_EXPLICIT' || stepSource === 'USER'
+          if (isExplicit) {
+            hasExplicitUser = true
+            const content = typeof parsed.content === 'string' ? parsed.content : ''
+            if (!detectedCwd) detectedCwd = extractAgyCwdFromText(content) ?? ''
+            const cleaned = cleanAgyUserPromptText(content)
+            if (cleaned) {
+              headUserCount += 1
+              if (!firstUserText) firstUserText = cleaned
+              lastPreview = cleaned
+            }
           }
         } else if (stepType === 'PLANNER_RESPONSE') {
           if (typeof parsed.model === 'string' && parsed.model.trim()) {
@@ -306,6 +437,11 @@ function discoverAntigravitySessions(homeDir: string): ExternalImportableSession
         }
       }
 
+      // Skip Antigravity internal subagent conversations (which start with SYSTEM_MESSAGE
+      // and have no USER_EXPLICIT user prompt).
+      if (startsWithSystemStep && !hasExplicitUser) continue
+      if (!hasExplicitUser) continue
+
       for (const line of slice.tail.split('\n')) {
         const trimmed = line.trim()
         if (!trimmed.startsWith('{')) continue
@@ -316,10 +452,11 @@ function discoverAntigravitySessions(homeDir: string): ExternalImportableSession
           continue
         }
         if (!isRecord(parsed)) continue
-        const stepType = typeof parsed.type === 'string' ? parsed.type : ''
-        if (stepType === 'USER_INPUT' && parsed.source === 'USER_EXPLICIT') {
-          hasExplicitUser = true
+        if (typeof parsed.step_index === 'number' && parsed.step_index > maxStepIndex) {
+          maxStepIndex = parsed.step_index
         }
+        const stepType = typeof parsed.type === 'string' ? parsed.type : ''
+        const stepSource = typeof parsed.source === 'string' ? parsed.source : ''
         if (stepType === 'PLANNER_RESPONSE') {
           if (typeof parsed.model === 'string' && parsed.model.trim()) {
             detectedModel = parsed.model.trim()
@@ -327,13 +464,21 @@ function discoverAntigravitySessions(homeDir: string): ExternalImportableSession
           if (typeof parsed.content === 'string' && parsed.content.trim()) {
             lastPreview = parsed.content.trim()
           }
-        } else if (stepType === 'USER_INPUT' && typeof parsed.content === 'string') {
-          const cleaned = cleanAgyUserPromptText(parsed.content)
-          if (cleaned) lastPreview = cleaned
+        } else if (stepType === 'USER_INPUT' && (!stepSource || stepSource === 'USER_EXPLICIT' || stepSource === 'USER')) {
+          if (typeof parsed.content === 'string') {
+            const cleaned = cleanAgyUserPromptText(parsed.content)
+            if (cleaned) lastPreview = cleaned
+          }
         }
       }
 
-      if (!hasExplicitUser && !firstUserText) continue
+      // Count exact user turns across the whole transcript when it exceeds the head+tail window
+      // (avoids misleading "1 turn" on long multi-thousand-step conversations).
+      const turnCount = slice.size <= MAX_SCAN_SLICE_BYTES * 2
+        ? headUserCount
+        : (countJsonlMatchingLines(transcriptPath, isAgyExplicitUserLine) ?? headUserCount)
+      const stepCount = maxStepIndex >= 0 ? maxStepIndex + 1 : undefined
+
       const taskHeading = extractAgyTaskHeading(sessionDir)
       const title = taskHeading || (firstUserText ? clipText(firstUserText.split('\n')[0] ?? firstUserText, MAX_TITLE_CHARS) : `Antigravity ${entry.slice(0, 8)}`)
       const thoughtLevel = inferAgyThoughtLevel(detectedModel)
@@ -348,7 +493,8 @@ function discoverAntigravitySessions(homeDir: string): ExternalImportableSession
         ...(lastPreview ? { preview: clipText(lastPreview, MAX_PREVIEW_CHARS) } : {}),
         ...(detectedModel ? { model: detectedModel } : {}),
         ...(thoughtLevel ? { thought_level: thoughtLevel } : {}),
-        ...(headUserCount > 0 ? { turn_count: headUserCount } : {}),
+        ...(turnCount > 0 ? { turn_count: turnCount } : {}),
+        ...(stepCount && stepCount > 0 ? { message_count: stepCount } : {}),
         source,
       }
       byId.set(entry, { mtimeMs: st.mtimeMs, session })
@@ -442,14 +588,17 @@ export function loadAntigravityTranscript(
           argsStr = args
           try {
             const parsedArgs = JSON.parse(args)
-            if (isRecord(parsedArgs)) inputs = parsedArgs
+            if (isRecord(parsedArgs)) {
+              inputs = normalizeAgyToolArgs(parsedArgs)
+              argsStr = JSON.stringify(inputs)
+            }
           } catch {
             inputs = { raw: args }
           }
         } else if (isRecord(args)) {
-          inputs = args
+          inputs = normalizeAgyToolArgs(args)
           try {
-            argsStr = JSON.stringify(args)
+            argsStr = JSON.stringify(inputs)
           } catch {
             argsStr = '{}'
           }
@@ -498,6 +647,9 @@ export function loadAntigravityTranscript(
 
   if (messages.length > MAX_IMPORT_MESSAGES) {
     messages.splice(0, messages.length - MAX_IMPORT_MESSAGES)
+    while (messages.length > 0 && messages[0]?.role === 'tool') {
+      messages.shift()
+    }
   }
   const turnCount = messages.filter(m => m.role === 'user').length
   const title =
@@ -615,6 +767,10 @@ function discoverClaudeCodeSessions(homeDir: string): ExternalImportableSession[
       if (slice.tail !== slice.head) inspectChunk(slice.tail, false)
       if (!firstUser && !customTitle) continue
 
+      const totalUserTurns = slice.size <= MAX_SCAN_SLICE_BYTES * 2
+        ? userTurns
+        : (countJsonlMatchingLines(fullPath, isClaudeRealUserLine) ?? userTurns)
+
       const title = clipText(customTitle || firstUser.split('\n')[0] || `Claude Code ${sessionId.slice(0, 8)}`, MAX_TITLE_CHARS)
       found.push({
         mtimeMs: st.mtimeMs,
@@ -628,7 +784,7 @@ function discoverClaudeCodeSessions(homeDir: string): ExternalImportableSession[
           updated_at: new Date(st.mtimeMs).toISOString(),
           ...(lastPreview ? { preview: clipText(lastPreview, MAX_PREVIEW_CHARS) } : {}),
           ...(model ? { model } : {}),
-          ...(userTurns > 0 ? { turn_count: userTurns } : {}),
+          ...(totalUserTurns > 0 ? { turn_count: totalUserTurns } : {}),
           source: proj,
         },
       })
@@ -835,6 +991,9 @@ export function loadClaudeCodeTranscript(
 
   if (messages.length > MAX_IMPORT_MESSAGES) {
     messages.splice(0, messages.length - MAX_IMPORT_MESSAGES)
+    while (messages.length > 0 && messages[0]?.role === 'tool') {
+      messages.shift()
+    }
   }
   const turnCount = messages.filter(m => m.role === 'user').length
   const title = clipText(
@@ -946,6 +1105,7 @@ function discoverCodexSessions(options: {
           (typeof row.preview === 'string' && row.preview.trim()) ||
           (typeof row.first_user_message === 'string' && row.first_user_message.trim()) ||
           undefined
+        const turnCount = rolloutPath ? countJsonlMatchingLines(rolloutPath, isCodexRealUserLine) : undefined
         byId.set(id, {
           updatedMs,
           session: {
@@ -959,6 +1119,7 @@ function discoverCodexSessions(options: {
             ...(preview ? { preview: clipText(cleanCodexTitle(preview), MAX_PREVIEW_CHARS) } : {}),
             ...(model ? { model } : {}),
             ...(thoughtLevel ? { thought_level: thoughtLevel } : {}),
+            ...(turnCount && turnCount > 0 ? { turn_count: turnCount } : {}),
             ...(rolloutPath ? { source: rolloutPath } : {}),
           },
         })
@@ -1020,6 +1181,7 @@ function discoverCodexSessions(options: {
       }
     }
     if (!sessionId || !isSafeSessionId(sessionId) || byId.has(sessionId) || !firstUser) continue
+    const turnCount = countJsonlMatchingLines(filePath, isCodexRealUserLine)
     byId.set(sessionId, {
       updatedMs: st.mtimeMs,
       session: {
@@ -1033,6 +1195,7 @@ function discoverCodexSessions(options: {
         preview: clipText(firstUser, MAX_PREVIEW_CHARS),
         ...(model ? { model } : {}),
         ...(effort ? { thought_level: effort } : {}),
+        ...(turnCount && turnCount > 0 ? { turn_count: turnCount } : {}),
         source: filePath,
       },
     })
@@ -1239,6 +1402,9 @@ export function loadCodexTranscript(
 
   if (messages.length > MAX_IMPORT_MESSAGES) {
     messages.splice(0, messages.length - MAX_IMPORT_MESSAGES)
+    while (messages.length > 0 && messages[0]?.role === 'tool') {
+      messages.shift()
+    }
   }
   const turnCount = messages.filter(m => m.role === 'user').length
   return {

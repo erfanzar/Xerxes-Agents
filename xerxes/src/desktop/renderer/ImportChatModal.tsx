@@ -37,6 +37,12 @@ function folderLabelOf(cwd: string): string {
   return clean.split(/[\\/]/).pop() || clean
 }
 
+function formatCompactCount(n: number): string {
+  if (n >= 10_000) return `${Math.round(n / 1_000)}k`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1).replace(/\.0$/, '')}k`
+  return String(n)
+}
+
 export function ImportChatModal({
   open,
   initialRuntime = 'all',
@@ -274,6 +280,7 @@ export function ImportChatModal({
               <input
                 ref={searchRef}
                 type="text"
+                className="import-chat-modal__search-input"
                 value={query}
                 onChange={event => setQuery(event.currentTarget.value)}
                 placeholder="Search by title, session ID, model, or folder…"
@@ -337,7 +344,10 @@ export function ImportChatModal({
                         <span>{item.runtimeName}</span>
                         {modelShort && <span>· {modelShort}</span>}
                         {item.turnCount && item.turnCount > 0 && (
-                          <span>· {item.turnCount} {item.turnCount === 1 ? 'turn' : 'turns'}</span>
+                          <span>· {formatCompactCount(item.turnCount)} {item.turnCount === 1 ? 'turn' : 'turns'}</span>
+                        )}
+                        {item.messageCount && item.messageCount > (item.turnCount ?? 0) * 2 && (
+                          <span>· {formatCompactCount(item.messageCount)} steps</span>
                         )}
                         {folder && <span title={item.cwd}>· {folder}</span>}
                         {age && <span>· {age}</span>}

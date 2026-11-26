@@ -161,6 +161,7 @@ export interface ExternalImportableSessionRow {
   readonly model?: string
   readonly thoughtLevel?: string
   readonly turnCount?: number
+  readonly messageCount?: number
   readonly source?: string
   readonly alreadyImported?: boolean
 }
@@ -6102,6 +6103,7 @@ export class Store {
           ...(str(row.model) ? { model: str(row.model) } : {}),
           ...(str(row.thought_level) ? { thoughtLevel: str(row.thought_level) } : {}),
           ...(typeof row.turn_count === 'number' ? { turnCount: row.turn_count } : {}),
+          ...(typeof row.message_count === 'number' ? { messageCount: row.message_count } : {}),
           ...(str(row.source) ? { source: str(row.source) } : {}),
           ...(row.already_imported === true ? { alreadyImported: true } : {}),
         })
@@ -6167,6 +6169,9 @@ export class Store {
       const importedCwd = str(result.cwd)
       await this.refreshSessions()
       if (sessionId) {
+        const cleanCwd = (value: string): string => value.replace(/\/+$/, '') || '/'
+        const switchesWorkspace = Boolean(importedCwd && this.frame.cwd && cleanCwd(importedCwd) !== cleanCwd(this.frame.cwd))
+        this.patch({ error: null })
         await this.openSession(sessionId, {
           id: sessionId,
           key: str(result.session_key) || sessionId,
@@ -6180,6 +6185,9 @@ export class Store {
           cwd: importedCwd || this.frame.cwd,
           untitled: false,
         })
+        if (!switchesWorkspace && this.frame.error && this.frame.currentId !== sessionId) {
+          return { ok: false, error: this.frame.error }
+        }
       }
       return {
         ok: true,

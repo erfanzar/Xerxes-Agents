@@ -346,7 +346,12 @@ export function transcriptHasHistory(transcript: Pick<DaemonTranscript, 'message
   const hasGoalHistory = transcript.metadata === undefined
     ? false
     : validateGoalMetadata(transcript.metadata)
-  if (transcript.turnCount > 0) return true
+  const hasImportedOrigin = Boolean(
+    transcript.metadata
+    && typeof transcript.metadata.imported_from === 'object'
+    && transcript.metadata.imported_from !== null,
+  )
+  if (transcript.turnCount > 0 || hasImportedOrigin) return true
   // A completed exchange requires at least one assistant message. User-only
   // transcripts are dead attempts — a prompt whose turn never produced a
   // reply — and must neither persist nor list as sessions, or every failed

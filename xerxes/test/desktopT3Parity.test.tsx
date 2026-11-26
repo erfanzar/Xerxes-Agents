@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { afterEach, describe, expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
 import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -1019,6 +1020,7 @@ describe('T3 Code Shell, Sidebar V2, Breadcrumb Header & Panels', () => {
             updatedAt: new Date().toISOString(),
             model: 'gemini-4-neon-high',
             turnCount: 74,
+            messageCount: 4120,
             preview: 'Verified all shards and launched single-pass 1k step run.',
           },
           {
@@ -1040,8 +1042,18 @@ describe('T3 Code Shell, Sidebar V2, Breadcrumb Header & Panels', () => {
     expect(modalHtml).toContain('Transforming Qwen Into Loop Transformer')
     expect(modalHtml).toContain('Optimize JAX kernel')
     expect(modalHtml).toContain('74 turns')
+    expect(modalHtml).toContain('4.1k steps')
+    expect(modalHtml).toContain('import-chat-modal__search-input')
     expect(modalHtml).toContain('Re-import')
     expect(modalHtml).toContain('Import by session ID…')
     expect(modalHtml.match(HEX_RE) ?? []).toEqual([])
+
+    // Verify CSS guards prevent half-clipped tabs and double search input borders in both Vibes & Neo.
+    const vibesCss = readFileSync(join(import.meta.dir, '..', 'src', 'desktop', 'renderer', 'vibes.css'), 'utf8')
+    expect(vibesCss).toContain('.import-chat-modal__search-input){border:0;border-radius:0;background:transparent;outline:none;box-shadow:none}')
+    expect(vibesCss).toContain('.import-chat-modal__tabs{flex:none;display:flex;flex-wrap:wrap;')
+    expect(vibesCss).toContain('.import-chat-modal__head{flex:none;')
+    expect(vibesCss).toContain('.import-chat-modal__controls{flex:none;')
+    expect(vibesCss).toContain('.import-chat-modal__foot{flex:none;')
   })
 })
