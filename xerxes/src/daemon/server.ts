@@ -41,6 +41,11 @@ import {
   type AgyBackgroundTaskSnapshot,
   type AgyBrainLocation,
 } from './agyBrainBridge.js';
+import {
+  discoverImportableExternalSessions,
+  loadExternalSessionTranscript,
+  type ExternalImportableSession,
+} from './externalSessionImporter.js';
 import { pathToFileURL } from 'node:url';
 import { DaemonSwarmHost, transcriptMessagesToChatMessages } from './swarmHost.js';
 import {
@@ -580,6 +585,7 @@ export const QUEUE_BYPASS_METHODS: ReadonlySet<string> = new Set([
   "acp.authenticate",
   "acp.login",
   "acp.sessions",
+  "acp.importable_sessions",
   "acp.fork",
 ]);
 
@@ -3196,13 +3202,24 @@ export class DaemonServer {
       }
       // A forced restart also stops ordinary turns a person started. Without a
       // marker the fresh process loads them idle and they silently stop; only
-      // armed goals used to come back. Mark each so it continues on its own.
+      // armed goals used to come back. Mark each native session so it continues
+      // on its own pinned model/provider. External ACP sessions (Antigravity,
+      // Claude Code, Codex, custom ACP) disconnect across restarts and
+      // Antigravity strictly forbids Xerxes-composed turns, so never mark them.
       const interrupted = force
         ? sessions.filter(session => !armed.includes(session) && !goalSessions.has(session.sessionKey)
+          && !this.isExternalAcpSession(session)
           && Boolean(session.activeTurnId || this.turnOwners.has(session.sessionKey) || session.status !== 'idle'))
         : [];
       for (const session of interrupted) {
-        session.metadata[TURN_RESUME_AFTER_RESTART_KEY] = { at: Date.now(), origin: stringValue(session.metadata.turn_origin) || 'human' };
+        if (session.model) session.modelPinned = true;
+        const pinnedProfile = optionalString(session.metadata.provider_profile)?.trim();
+        session.metadata[TURN_RESUME_AFTER_RESTART_KEY] = {
+          at: Date.now(),
+          origin: stringValue(session.metadata.turn_origin) || 'human',
+          ...(session.model ? { model: session.model } : {}),
+          ...(pinnedProfile ? { provider_profile: pinnedProfile } : {}),
+        };
       }
       if (armed.length) {
         for (const session of armed) {
@@ -3518,6 +3535,8 @@ export class DaemonServer {
       method === "acp.authenticate" ||
       method === "acp.login" ||
       method === "acp.sessions" ||
+      method === "acp.importable_sessions" ||
+      method === "acp.import_session" ||
       method === "acp.fork"
     ) {
       return this.handleAcpRpc(connection, method, params);
@@ -3660,6 +3679,14 @@ export class DaemonServer {
         connection,
         this.runtime.sessionStatus(key),
         false,
+      );
+    }
+    if (method === "session.rewind") {
+      const key = sessionKey(connection, params);
+      return this.rewindSession(
+        connection,
+        this.runtime.sessionStatus(key),
+        params,
       );
     }
     if (method === "session.most_recent") {
@@ -10295,8 +10322,8 @@ export class DaemonServer {
       }
       return { ok: false, error: "no active session" };
     }
-    if (this.acpBridgeHost.hasActiveBridge(session.id)) {
-      const binding = this.acpBridgeHost.getBinding(session.id);
+    if (this.isExternalAcpSession(session)) {
+      const binding = this.acpBridgeHost.getBinding(session.id) ?? this.savedExternalAcpBinding(session);
       const name = binding?.name || "the external ACP runtime";
       const error = `Compaction is managed by ${name}. Use \`/compact\` directly instead of native Xerxes compaction.`;
       if (notify) this.emitSlash(notify, error, "warning");
@@ -10576,7 +10603,7 @@ export class DaemonServer {
     signal?: AbortSignal,
   ): Promise<void> {
     const session = this.runtime.sessionStatus(sessionKey);
-    if (!session || session.activeTurnId || session.messages.length < 2 || this.acpBridgeHost.hasActiveBridge(session.id)) {
+    if (!session || session.activeTurnId || session.messages.length < 2 || this.isExternalAcpSession(session)) {
       return Promise.resolve();
     }
     const model = session.model || stringValue(this.runtime.status().model);
@@ -11513,6 +11540,106 @@ export class DaemonServer {
       );
     }
     return { ok: true, dropped };
+  }
+
+  private rewindSession(
+    connection: DaemonTransportConnection,
+    session: DaemonSession | undefined,
+    params: JsonRpcPayload,
+  ): Promise<JsonRpcPayload> {
+    if (session && this.sessionOperations.has(session.sessionKey)) {
+      return Promise.resolve({
+        ok: false,
+        error: "Cannot rewind while another session operation is in progress.",
+      });
+    }
+    return session
+      ? this.withSessionOperation(session.sessionKey, () =>
+          this.rewindSessionUnlocked(connection, session, params),
+        )
+      : this.rewindSessionUnlocked(connection, session, params);
+  }
+
+  private async rewindSessionUnlocked(
+    connection: DaemonTransportConnection,
+    session: DaemonSession | undefined,
+    params: JsonRpcPayload,
+  ): Promise<JsonRpcPayload> {
+    if (!session) {
+      return { ok: false, error: "no active session" };
+    }
+    if (session.activeTurnId || this.turnOwners.has(session.sessionKey)) {
+      return { ok: false, error: "Cannot rewind while a turn is running. Stop it first." };
+    }
+    if (session.messages.length === 0) {
+      return { ok: false, error: "Nothing to rewind." };
+    }
+    const rawIndex = params.message_index;
+    const requestedIndex =
+      typeof rawIndex === "number" && Number.isInteger(rawIndex) && rawIndex >= 0
+        ? rawIndex
+        : undefined;
+    const matchText = optionalString(params.match_text)?.trim() || undefined;
+    const inclusive = params.inclusive !== false;
+    const targetIndex = resolveRewindTargetIndex(session.messages, requestedIndex, matchText);
+    if (targetIndex < 0 || targetIndex >= session.messages.length) {
+      return { ok: false, error: "Could not locate that message in the conversation." };
+    }
+    const targetMessage = session.messages[targetIndex]!;
+    const rawPrompt = optionalString(targetMessage.text)?.trim() || messageText(targetMessage).trim();
+    const restoredPrompt = targetMessage.origin === "agent" ? "" : rawPrompt;
+    const cutIndex = inclusive ? targetIndex : targetIndex + 1;
+    const removed = session.messages.splice(cutIndex);
+    if (removed.length === 0) {
+      return { ok: false, error: "Nothing to rewind after that message." };
+    }
+    pruneRewoundToolExecutions(session, removed);
+    const remainingAssistants = session.messages.filter(
+      (message) => message.role.toLowerCase() === "assistant",
+    ).length;
+    if (session.thinkingContent.length > remainingAssistants) {
+      session.thinkingContent.splice(remainingAssistants);
+    }
+    let remainingTurns = 0;
+    for (const message of session.messages) {
+      if (
+        message.role.toLowerCase() === "user"
+        && message.origin !== "harness"
+        && !isCompactionSummaryMessage(message)
+      ) {
+        remainingTurns += 1;
+      }
+    }
+    session.turnCount = remainingTurns;
+    delete session.metadata[TURN_RESUME_AFTER_RESTART_KEY];
+    session.status = "idle";
+    session.cancelRequested = false;
+    session.lastActive = Date.now();
+    this.clearAutoCompactFailures(session.sessionKey);
+    this.cancelQueuedSteers(session.sessionKey, "session-rewound");
+    await this.runtime.flushSessions("rewrite", session.sessionKey);
+    if (session.messages.length === 0 && session.turnCount === 0) {
+      await this.runtime.removeSavedTranscript?.(session.id);
+      session.transcriptGeneration = 0;
+      session.persistedMessageCount = 0;
+    }
+    this.emitStatus(connection, session, { scoped: true });
+    this.notifySessionStateChanged(session.id);
+    return {
+      ok: true,
+      dropped: removed.length,
+      remaining_messages: session.messages.length,
+      turn_count: session.turnCount,
+      restored_prompt: restoredPrompt,
+      external_acp: this.isExternalAcpSession(session),
+      session: this.sessionWirePayload(
+        session,
+        this.contextLimit(session.model, session),
+        this.mcpStatusRecord(session),
+        100,
+        session,
+      ),
+    };
   }
 
   private retryLastTurn(
@@ -12673,15 +12800,38 @@ export class DaemonServer {
     return outcome;
   }
 
-  /** Whether a session id is live on Antigravity, where only the account owner's local typing may reach agy. */
-  private isAntigravitySessionId(sessionId: string): boolean {
-    const binding = this.acpBridgeHost.getBinding(sessionId);
-    return Boolean(binding?.connected && isAntigravityBinding(binding));
+  /** Persisted external ACP binding stamped on a session's metadata (survives daemon restarts). */
+  private savedExternalAcpBinding(session: DaemonSession | undefined): AcpSessionBinding | undefined {
+    const raw = session?.metadata.acp_binding;
+    if (!isRecord(raw)) return undefined;
+    const agentId = optionalString(raw.agent_id)?.trim() ?? "";
+    const transport = optionalString(raw.transport)?.trim() ?? "";
+    if (!agentId || agentId === "xerxes" || transport === "native") return undefined;
+    return raw as unknown as AcpSessionBinding;
   }
 
-  /** Whether this session is live on Antigravity, where only the account owner's local typing may reach agy. */
+  /** Whether a session is pinned to an external ACP runtime (live bridge OR persisted saved binding). */
+  private isExternalAcpSession(session: DaemonSession | undefined): boolean {
+    if (!session) return false;
+    return this.acpBridgeHost.hasActiveBridge(session.id) || this.savedExternalAcpBinding(session) !== undefined;
+  }
+
+  /** Whether a session id belongs to Antigravity (live bridge OR persisted saved binding), where only the account owner's local typing may reach agy. */
+  private isAntigravitySessionId(sessionId: string): boolean {
+    const binding = this.acpBridgeHost.getBinding(sessionId);
+    if (binding?.connected && isAntigravityBinding(binding)) return true;
+    const session = this.runtime.sessionById?.(sessionId)
+      ?? this.runtime.listSessions().find((candidate) => candidate.id === sessionId);
+    const saved = this.savedExternalAcpBinding(session);
+    return Boolean(saved && isAntigravityBinding(saved));
+  }
+
+  /** Whether this session belongs to Antigravity (live bridge OR persisted saved binding), where only the account owner's local typing may reach agy. */
   private isAntigravitySession(session: DaemonSession): boolean {
-    return this.isAntigravitySessionId(session.id);
+    const binding = this.acpBridgeHost.getBinding(session.id);
+    if (binding?.connected && isAntigravityBinding(binding)) return true;
+    const saved = this.savedExternalAcpBinding(session);
+    return Boolean(saved && isAntigravityBinding(saved));
   }
 
   /** `turn.submit` for hub principals and for callers that opt in with `if_busy`. */
@@ -14146,10 +14296,49 @@ export class DaemonServer {
     const emit = connection
       ? (event: DaemonEvent) => this.emit(connection, event.type, event.payload)
       : this.sessionViewerEmitter(session.id);
+    // External ACP runtimes (Antigravity, Claude Code, Codex, custom ACP) disconnect
+    // across a daemon restart and Antigravity strictly forbids Xerxes-composed turns.
+    // Never auto-submit a synthetic restart prompt or fall through to native Xerxes.
+    const savedAcp = this.savedExternalAcpBinding(session);
+    if (this.isExternalAcpSession(session)) {
+      const runtimeName = savedAcp?.name || 'the external runtime';
+      emit({
+        type: 'notification',
+        payload: {
+          level: 'info',
+          message: `The runtime restarted mid-turn. Reconnect ${runtimeName} and continue when ready.`,
+          session_id: session.id,
+        },
+      });
+      return;
+    }
+    // Pin the session strictly to the model and provider profile that were active
+    // before the restart so an update or default change never switches providers mid-task.
+    const pinnedModel = optionalString(record.model)?.trim() || session.model;
+    const pinnedProfile = optionalString(record.provider_profile)?.trim() || optionalString(session.metadata.provider_profile)?.trim();
+    if (pinnedModel) {
+      session.model = pinnedModel;
+      session.modelPinned = true;
+    }
+    if (pinnedProfile) {
+      session.metadata.provider_profile = pinnedProfile;
+      if (this.profileStore && !this.profileStore.get(pinnedProfile)) {
+        emit({
+          type: 'notification',
+          payload: {
+            level: 'warning',
+            message: `Could not continue automatically after restart because pinned provider "${pinnedProfile}" is no longer available.`,
+            session_id: session.id,
+          },
+        });
+        return;
+      }
+    }
     emit({ type: 'notification', payload: { level: 'info', message: 'The runtime restarted mid-turn; continuing this task.', session_id: session.id } });
     const run = new Promise<void>(resolve => setTimeout(resolve, 0)).then(() => this.withSessionOperation(sessionKey, async () => {
       const live = this.runtime.sessionStatus(sessionKey);
       if (!live || live.id !== session.id || live.activeTurnId || live.cancelRequested || this.turnOwners.has(sessionKey)) return;
+      if (this.isExternalAcpSession(live)) return;
       await this.submitTrackedTurn(sessionKey, TURN_RESUME_PROMPT, emit, undefined, {
         displayText: 'Continue after the runtime restart', origin: 'agent',
       }, true);
@@ -14496,9 +14685,11 @@ export class DaemonServer {
       };
       const activeSession = this.runtime.sessionStatus(sessionKey);
       const acpBinding = activeSession ? this.acpBridgeHost.getBinding(activeSession.id) : null;
-      if (activeSession && acpBinding?.connected && isAntigravityBinding(acpBinding) && options.userAuthored !== true) {
+      const savedExternalAcp = activeSession ? this.savedExternalAcpBinding(activeSession) : undefined;
+      if (activeSession && this.isAntigravitySession(activeSession) && options.userAuthored !== true) {
         // Only what a person typed reaches an Antigravity session. Refuse,
-        // visibly, every turn whose text Xerxes composed itself.
+        // visibly, every turn whose text Xerxes composed itself — even if the
+        // Antigravity bridge is currently disconnected after a restart.
         if (options.goalRound !== undefined) {
           this.blockGoalForFailure(sessionKey, "round-failed", ANTIGRAVITY_COMPOSED_TURN_REFUSAL);
           return;
@@ -14507,11 +14698,44 @@ export class DaemonServer {
           type: "notification",
           payload: { level: "error", message: ANTIGRAVITY_COMPOSED_TURN_REFUSAL, session_id: activeSession.id },
         });
+        if (options.announceSuppressedTurn === true) {
+          forward({
+            type: "turn_end",
+            payload: { cancelled: true, unstarted: true, session_id: activeSession.id },
+          });
+        }
+        return;
+      }
+      if (activeSession && !acpBinding?.connected && savedExternalAcp) {
+        // Fail closed: a session pinned to an external ACP runtime (Antigravity,
+        // Claude Code, Codex, custom ACP) must NEVER silently fall through to
+        // native Xerxes or a different provider when its external bridge is down.
+        const runtimeName = savedExternalAcp.name || savedExternalAcp.agent_id;
+        const message = `${runtimeName} is disconnected for this session — reconnect ${runtimeName} before sending. Xerxes will not fall back to another model or provider.`;
+        if (options.goalRound !== undefined) {
+          this.blockGoalForFailure(sessionKey, "round-failed", message);
+          return;
+        }
+        forward({
+          type: "notification",
+          payload: { level: "error", message, session_id: activeSession.id },
+        });
+        if (options.announceSuppressedTurn === true) {
+          forward({
+            type: "turn_end",
+            payload: { cancelled: true, unstarted: true, session_id: activeSession.id },
+          });
+        }
         return;
       }
       if (activeSession && acpBinding?.connected) {
         await this.runExternalAcpTurn(activeSession, text, forward, options);
       } else {
+        // Pin the active native session's model before running so global default
+        // switches or restarts cannot drift it mid-conversation.
+        if (activeSession && activeSession.model) {
+          activeSession.modelPinned = true;
+        }
         await this.runtime.submitTurn(sessionKey, text, forward, {
           ...options,
           pullQueuedSteers: () => this.pullQueuedSteers(sessionKey),
@@ -15586,6 +15810,12 @@ export class DaemonServer {
     method: string,
     params: JsonRpcPayload,
   ): Promise<JsonRpcPayload> {
+    if (method === "acp.importable_sessions") {
+      return this.handleAcpImportableSessions(connection, params);
+    }
+    if (method === "acp.import_session") {
+      return this.handleAcpImportSession(connection, params);
+    }
     const isReadOnly = method === "acp.agents" || method === "acp.catalog";
     const target = await this.resolveSwarmTarget(connection, params, !isReadOnly && method === "acp.connect");
 
@@ -15975,7 +16205,33 @@ export class DaemonServer {
       };
     }
 
-    const activeExternal = agentId === "xerxes" ? null : result.binding;
+    let finalBinding = result.binding;
+    if (agentId !== "xerxes" && savedMatchesTarget && savedBinding) {
+      // Restore the exact model and thinking effort pinned to this session before reconnect.
+      const savedModelId = typeof savedBinding.current_model === "string" ? savedBinding.current_model.trim() : "";
+      if (savedModelId && finalBinding.current_model !== savedModelId) {
+        const restoredModel = await this.acpBridgeHost.setModel(target.id, savedModelId);
+        if (restoredModel.ok) {
+          finalBinding = restoredModel.binding;
+        }
+      }
+      const savedThoughtLevel = typeof savedBinding.thought_level === "string" ? savedBinding.thought_level.trim() : "";
+      const savedThoughtConfigId =
+        typeof savedBinding.thought_level_config_id === "string" && savedBinding.thought_level_config_id.trim()
+          ? savedBinding.thought_level_config_id.trim()
+          : finalBinding.thought_level_config_id || "thought_level";
+      if (savedThoughtLevel && finalBinding.thought_level !== savedThoughtLevel) {
+        const restoredThought = await this.acpBridgeHost.setConfigOption(
+          target.id,
+          savedThoughtConfigId,
+          savedThoughtLevel,
+        );
+        if (restoredThought.ok) {
+          finalBinding = restoredThought.binding;
+        }
+      }
+    }
+    const activeExternal = agentId === "xerxes" ? null : finalBinding;
     if (target.session) {
       if (activeExternal) {
         target.session.metadata.acp_binding = activeExternal;
@@ -16006,7 +16262,279 @@ export class DaemonServer {
     }
     return {
       ok: true,
-      binding: result.binding as unknown as JsonRpcPayload,
+      binding: finalBinding as unknown as JsonRpcPayload,
+    };
+  }
+
+  private async handleAcpImportableSessions(
+    connection: DaemonTransportConnection,
+    params: JsonRpcPayload,
+  ): Promise<JsonRpcPayload> {
+    const activeSession = this.runtime.sessionStatus(connection.activeSessionKey);
+    const cwd = resolveProjectDirectory(
+      optionalString(params.cwd)?.trim() ||
+        activeSession?.cwd ||
+        this.projectDirectory ||
+        process.cwd(),
+    );
+    const runtimeFilter = optionalString(params.runtime)?.trim() || "all";
+    const allProjects = params.all_projects === true;
+    const query = optionalString(params.query)?.trim() || undefined;
+    const rawLimit = typeof params.limit === "number" && Number.isFinite(params.limit)
+      ? Math.max(1, Math.min(200, Math.trunc(params.limit)))
+      : 80;
+
+    // Track already-imported external session keys across live and saved Xerxes sessions.
+    const existingExternalKeys = new Set<string>();
+    for (const s of this.runtime.listSessions()) {
+      const b = this.savedExternalAcpBinding(s) ?? this.acpBridgeHost.getBinding(s.id);
+      if (b?.agent_id && b.external_session_id) {
+        existingExternalKeys.add(`${b.agent_id}:${b.external_session_id}`);
+      }
+    }
+    try {
+      const saved = await this.runtime.listSavedSessions(400, { kind: "main" });
+      for (const row of saved) {
+        const agentId = row.acpAgentId?.trim();
+        const extId = row.acpExternalSessionId?.trim();
+        if (agentId && extId) {
+          existingExternalKeys.add(`${agentId}:${extId}`);
+        }
+      }
+    } catch {
+      // Non-fatal: continue with live session index.
+    }
+
+    const diskSessions = discoverImportableExternalSessions({
+      allProjects,
+      cwd,
+      existingExternalKeys,
+      limit: rawLimit,
+      ...(query ? { query } : {}),
+      runtime: runtimeFilter,
+    });
+
+    // Merge live ACP `session/list` rows when an external ACP bridge is connected
+    // (enriches Antigravity titles/cwds and supports custom stdio ACP agents).
+    const mergedByKey = new Map<string, ExternalImportableSession>();
+    for (const item of diskSessions) {
+      mergedByKey.set(`${item.runtime_id}:${item.id}`, item);
+    }
+    const targetSession = activeSession;
+    const liveBinding = targetSession ? this.acpBridgeHost.getBinding(targetSession.id) : null;
+    if (
+      targetSession
+      && liveBinding?.connected
+      && liveBinding.transport === "acp"
+      && liveBinding.capabilities?.session.list
+      && (runtimeFilter === "all" || runtimeFilter.toLowerCase() === liveBinding.agent_id.toLowerCase())
+    ) {
+      const listed = await this.acpBridgeHost.listExternalSessions(targetSession.id, {
+        ...(allProjects ? {} : { cwd }),
+      }).catch(() => null);
+      if (listed?.ok) {
+        const needle = (query ?? "").toLowerCase();
+        for (const item of listed.sessions) {
+          const key = `${liveBinding.agent_id}:${item.session_id}`;
+          const prev = mergedByKey.get(key);
+          const title = item.title?.trim() || prev?.title || `${liveBinding.name} ${item.session_id.slice(0, 8)}`;
+          const itemCwd = item.cwd?.trim() || prev?.cwd || cwd;
+          const updatedAt = item.updated_at?.trim() || prev?.updated_at || new Date().toISOString();
+          const candidate: ExternalImportableSession = {
+            ...(prev ?? {}),
+            id: item.session_id,
+            runtime_id: liveBinding.agent_id,
+            runtime_name: liveBinding.name,
+            provider: liveBinding.provider,
+            title,
+            cwd: itemCwd,
+            updated_at: updatedAt,
+            ...(existingExternalKeys.has(key) ? { already_imported: true } : {}),
+          };
+          if (
+            !needle
+            || candidate.title.toLowerCase().includes(needle)
+            || candidate.id.toLowerCase().includes(needle)
+            || candidate.cwd.toLowerCase().includes(needle)
+          ) {
+            mergedByKey.set(key, candidate);
+          }
+        }
+      }
+    }
+
+    const sessions = [...mergedByKey.values()]
+      .sort((a, b) => Date.parse(b.updated_at || "0") - Date.parse(a.updated_at || "0"))
+      .slice(0, rawLimit);
+
+    const { agents } = this.acpBridgeHost.listAgents(activeSession?.id);
+    const countsByRuntime = new Map<string, number>();
+    for (const s of sessions) {
+      countsByRuntime.set(s.runtime_id, (countsByRuntime.get(s.runtime_id) ?? 0) + 1);
+    }
+    const runtimes = agents
+      .filter((a) => a.id !== "xerxes")
+      .map((a) => ({
+        id: a.id,
+        name: a.name,
+        provider: a.provider,
+        available: a.available,
+        count: countsByRuntime.get(a.id) ?? 0,
+      }));
+
+    return {
+      ok: true,
+      cwd,
+      sessions: sessions as unknown as JsonRpcPayload[],
+      runtimes: runtimes as unknown as JsonRpcPayload[],
+    };
+  }
+
+  private async handleAcpImportSession(
+    connection: DaemonTransportConnection,
+    params: JsonRpcPayload,
+  ): Promise<JsonRpcPayload> {
+    const runtimeId = optionalString(params.runtime_id)?.trim() ?? optionalString(params.agent_id)?.trim() ?? "";
+    const externalSessionId =
+      optionalString(params.external_session_id)?.trim() ??
+      optionalString(params.session_id)?.trim() ??
+      "";
+    if (!runtimeId || runtimeId === "xerxes") {
+      return { ok: false, error: "runtime_id must name an external runtime (e.g. antigravity, claude-code, codex)." };
+    }
+    if (!externalSessionId) {
+      return { ok: false, error: "external_session_id is required." };
+    }
+    const activeSession = this.runtime.sessionStatus(connection.activeSessionKey);
+    const source = optionalString(params.source)?.trim() || undefined;
+    const loaded = loadExternalSessionTranscript({
+      runtimeId,
+      externalSessionId,
+      ...(source ? { source } : {}),
+    });
+    const requestedCwd = optionalString(params.cwd)?.trim() || loaded?.cwd || activeSession?.cwd || this.projectDirectory || process.cwd();
+    const cwd = resolveProjectDirectory(requestedCwd);
+    const newSlotKey = `import-${runtimeId}-${crypto.randomUUID().slice(0, 8)}`;
+    const session = await this.runtime.openSession(newSlotKey, undefined, { cwd, preserveProject: true });
+    const shouldConnect = params.connect !== false;
+
+    const { agents } = this.acpBridgeHost.listAgents(session.id);
+    const agentInfo = agents.find((a) => a.id === runtimeId);
+    const runtimeName = agentInfo?.name ?? runtimeId;
+    const provider = agentInfo?.provider ?? (
+      runtimeId === "antigravity"
+        ? "antigravity"
+        : runtimeId === "claude-code"
+          ? "claude-code"
+          : runtimeId === "codex"
+            ? "codex"
+            : "acp"
+    );
+    const command = optionalString(params.command)?.trim() || undefined;
+
+    let connected = false;
+    let connectWarning: string | undefined;
+    let connectedBinding: AcpSessionBinding | undefined;
+    if (shouldConnect) {
+      const connectResult = await this.acpBridgeHost.connect({
+        sessionId: session.id,
+        agentId: runtimeId,
+        cwd,
+        resumeSessionId: externalSessionId,
+        ...(command ? { command } : {}),
+      });
+      if (connectResult.ok) {
+        connected = true;
+        connectedBinding = connectResult.binding;
+        if (loaded?.model && connectedBinding.current_model !== loaded.model) {
+          const switched = await this.acpBridgeHost.setModel(session.id, loaded.model);
+          if (switched.ok) connectedBinding = switched.binding;
+        }
+        if (loaded?.thoughtLevel && connectedBinding.thought_level !== loaded.thoughtLevel) {
+          const cfgId = connectedBinding.thought_level_config_id || "thought_level";
+          const switched = await this.acpBridgeHost.setConfigOption(session.id, cfgId, loaded.thoughtLevel);
+          if (switched.ok) connectedBinding = switched.binding;
+        }
+      } else {
+        connectWarning = connectResult.error;
+      }
+    }
+
+    // If ACP `session/load` did not replay history directly into the session (e.g. zero-replay
+    // `session/resume`, `claude-stream-json`, `codex-exec-json`, or offline import), populate
+    // the full chronological transcript read-only from the runtime's local transcript store.
+    if (session.messages.length === 0 && loaded && loaded.messages.length > 0) {
+      session.messages.splice(0, session.messages.length, ...loaded.messages);
+      session.toolExecutions.splice(0, session.toolExecutions.length, ...loaded.toolExecutions);
+      session.thinkingContent.splice(0, session.thinkingContent.length, ...loaded.thinkingContent);
+      session.turnCount = loaded.turnCount;
+    }
+
+    if (session.messages.length === 0 && !connected) {
+      await this.runtime.removeSavedTranscript?.(session.id);
+      return {
+        ok: false,
+        error: connectWarning
+          ? `Could not import "${externalSessionId}" from ${runtimeName}: no local transcript found and runtime connection failed (${connectWarning}).`
+          : `No local transcript found for "${externalSessionId}" in ${runtimeName}.`,
+      };
+    }
+
+    const explicitTitle = optionalString(params.title)?.trim();
+    const resolvedTitle =
+      explicitTitle ||
+      loaded?.title ||
+      optionalString(session.metadata.title)?.trim() ||
+      `${runtimeName} ${externalSessionId.slice(0, 8)}`;
+    session.metadata.title = resolvedTitle;
+    session.metadata.title_derived = true;
+    session.metadata.imported_from = {
+      runtime_id: runtimeId,
+      external_session_id: externalSessionId,
+      imported_at: new Date().toISOString(),
+    };
+    const bindingToPersist: AcpSessionBinding = connectedBinding ?? {
+      session_id: session.id,
+      agent_id: runtimeId,
+      name: runtimeName,
+      provider,
+      transport: agentInfo?.transport && agentInfo.transport !== "native" ? agentInfo.transport : "acp",
+      cwd,
+      external_session_id: externalSessionId,
+      connected: false,
+      ...(agentInfo?.command ? { command: agentInfo.command } : {}),
+      ...(loaded?.model ? { current_model: loaded.model, current_model_name: loaded.model } : {}),
+      ...(loaded?.thoughtLevel ? { thought_level: loaded.thoughtLevel } : {}),
+    };
+    session.metadata.acp_binding = bindingToPersist;
+    session.lastActive = Date.now();
+    await this.runtime.flushSessions("rewrite", session.sessionKey);
+
+    if (connected && connectedBinding) {
+      this.emitAcpStatus(session.id, connectedBinding, cwd);
+      if (isAntigravityBinding(connectedBinding)) {
+        this.ensureAgySwarmWatch(session);
+      }
+    }
+    this.notifySessionStateChanged(session.id);
+
+    return {
+      ok: true,
+      session_id: session.id,
+      session_key: session.sessionKey,
+      title: resolvedTitle,
+      cwd: session.cwd,
+      imported_messages: session.messages.length,
+      imported_turns: session.turnCount,
+      connected,
+      ...(connectWarning ? { warning: connectWarning } : {}),
+      session: this.sessionWirePayload(
+        session,
+        this.contextLimit(session.model, session),
+        this.mcpStatusRecord(session),
+        100,
+        session,
+      ),
     };
   }
 
@@ -19202,6 +19730,88 @@ function lastUserMessage(
 function discardLastUserTurn(messages: DaemonSession["messages"]): number {
   const index = lastUserTurnIndex(messages);
   return index < 0 ? 0 : messages.splice(index).length;
+}
+
+function comparableUserTexts(message: DaemonSession["messages"][number]): string[] {
+  const values: string[] = [];
+  const display = optionalString(message.text)?.trim();
+  if (display) values.push(display);
+  const raw = messageText(message).trim();
+  if (raw && !values.includes(raw)) values.push(raw);
+  return values;
+}
+
+/** Locate the user message index to rewind to by exact index, text match (newest first), or last turn. */
+function resolveRewindTargetIndex(
+  messages: readonly DaemonSession["messages"][number][],
+  requestedIndex: number | undefined,
+  matchText: string | undefined,
+): number {
+  const isRewindableUser = (message: DaemonSession["messages"][number] | undefined): boolean =>
+    Boolean(
+      message
+      && message.role.toLowerCase() === "user"
+      && message.origin !== "harness"
+      && !isCompactionSummaryMessage(message),
+    );
+  if (requestedIndex !== undefined && requestedIndex >= 0 && requestedIndex < messages.length) {
+    const candidate = messages[requestedIndex];
+    if (isRewindableUser(candidate)) {
+      if (!matchText || comparableUserTexts(candidate!).includes(matchText)) {
+        return requestedIndex;
+      }
+    }
+  }
+  if (matchText) {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const candidate = messages[index];
+      if (!isRewindableUser(candidate)) continue;
+      if (comparableUserTexts(candidate!).includes(matchText)) {
+        return index;
+      }
+    }
+  }
+  if (requestedIndex === undefined && !matchText) {
+    return lastUserTurnIndex(messages);
+  }
+  return -1;
+}
+
+/** Drop stored tool executions belonging to rewound messages so replayed history stays aligned. */
+function pruneRewoundToolExecutions(
+  session: DaemonSession,
+  removed: readonly DaemonSession["messages"][number][],
+): void {
+  if (session.toolExecutions.length === 0) return;
+  const droppedIds = new Set<string>();
+  for (const message of removed) {
+    const directId = optionalString(message.tool_call_id);
+    if (directId) droppedIds.add(directId);
+    if (Array.isArray(message.tool_calls)) {
+      for (const call of message.tool_calls) {
+        if (isRecord(call)) {
+          const callId = optionalString(call.id);
+          if (callId) droppedIds.add(callId);
+        }
+      }
+    }
+  }
+  const hasRemainingToolRefs = session.messages.some(
+    (message) =>
+      message.role.toLowerCase() === "tool"
+      || (Array.isArray(message.tool_calls) && message.tool_calls.length > 0),
+  );
+  if (!hasRemainingToolRefs) {
+    session.toolExecutions.length = 0;
+    return;
+  }
+  if (droppedIds.size === 0) return;
+  const kept = session.toolExecutions.filter((entry) => {
+    if (!isRecord(entry)) return true;
+    const id = toolExecutionCallId(entry);
+    return !id || !droppedIds.has(id);
+  });
+  session.toolExecutions.splice(0, session.toolExecutions.length, ...kept);
 }
 
 function toolExecutionName(value: unknown): string {

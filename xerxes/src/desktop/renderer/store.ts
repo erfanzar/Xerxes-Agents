@@ -147,7 +147,31 @@ function writeSideQuestionModel(model: string): void {
 }
 
 export type AcpAgentProvider = 'xerxes' | 'claude-code' | 'antigravity' | 'codex' | 'acp'
-export type AcpAgentTransport = 'native' | 'acp' | 'claude-stream-json'
+export type AcpAgentTransport = 'native' | 'acp' | 'claude-stream-json' | 'codex-exec-json'
+
+export interface ExternalImportableSessionRow {
+  readonly id: string
+  readonly runtimeId: string
+  readonly runtimeName: string
+  readonly provider: AcpAgentProvider
+  readonly title: string
+  readonly cwd: string
+  readonly updatedAt: string
+  readonly preview?: string
+  readonly model?: string
+  readonly thoughtLevel?: string
+  readonly turnCount?: number
+  readonly source?: string
+  readonly alreadyImported?: boolean
+}
+
+export interface ExternalImportableRuntimeSummary {
+  readonly id: string
+  readonly name: string
+  readonly provider: AcpAgentProvider
+  readonly available: boolean
+  readonly count: number
+}
 
 export interface AcpExternalAgentInfo {
   readonly id: string
@@ -407,7 +431,7 @@ function parseAcpProvider(value: unknown): AcpAgentProvider {
 }
 
 function parseAcpTransport(value: unknown): AcpAgentTransport {
-  return value === 'native' || value === 'acp' || value === 'claude-stream-json'
+  return value === 'native' || value === 'acp' || value === 'claude-stream-json' || value === 'codex-exec-json'
     ? value
     : 'acp'
 }
@@ -2800,11 +2824,22 @@ export class Store {
       ...(saved.sandbox ? { sandbox: true } : {}),
       ...(saved.agent_override ? { agent: saved.agent_override } : {}),
     }
-    return this.connectAcpAgent(
+    const ok = await this.connectAcpAgent(
       saved.agent_id,
       custom,
       Object.keys(connectOpts).length > 0 ? connectOpts : undefined,
     )
+    if (!ok) return false
+    // Ensure pinned external model and thinking effort are restored even when
+    // reconnecting against an older remote daemon that does not auto-apply them.
+    const live = this.frame.acpBinding
+    if (saved.current_model && live?.current_model !== saved.current_model) {
+      await this.setAcpModel(saved.current_model)
+    }
+    if (saved.thought_level && this.frame.acpBinding?.thought_level !== saved.thought_level) {
+      await this.setAcpThoughtLevel(saved.thought_level)
+    }
+    return true
   }
 
   async retryAcpConnect(): Promise<boolean> {
@@ -5968,6 +6003,195 @@ export class Store {
   resolveFailure(): void {
     this.failure = null
     this.patch({ failed: null, turnFailed: false })
+  }
+
+  /** Rewind the active conversation to a specific user message (or the last turn when omitted). */
+  async rewindToMessage(target?: {
+    readonly messageIndex?: number
+    readonly text?: string
+    readonly inclusive?: boolean
+  }): Promise<{
+    readonly ok: boolean
+    readonly error?: string
+    readonly restoredPrompt?: string
+    readonly externalAcp?: boolean
+  }> {
+    if (this.frame.turnActive) {
+      return { ok: false, error: 'Stop the active turn before rewinding.' }
+    }
+    const key = this.sessionKey
+    const { isCurrent } = this.captureSessionRequest()
+    try {
+      const result = await this.bridge.call('session.rewind', {
+        session_key: key,
+        ...(target?.messageIndex !== undefined ? { message_index: target.messageIndex } : {}),
+        ...(target?.text ? { match_text: target.text } : {}),
+        ...(target?.inclusive !== undefined ? { inclusive: target.inclusive } : {}),
+      })
+      if (!isCurrent()) return { ok: result.ok === true }
+      if (result.ok !== true) {
+        return { ok: false, error: str(result.error) || 'Could not rewind this conversation.' }
+      }
+      this.failure = null
+      this.lastUser = ''
+      const session = result.session && typeof result.session === 'object'
+        ? result.session as Record<string, unknown>
+        : null
+      if (session) {
+        this.adoptHistory(session, false)
+      } else if (this.frame.currentId) {
+        await this.openSession(this.frame.currentId)
+      }
+      this.patch({ failed: null, turnFailed: false, error: null })
+      this.notify()
+      void this.refreshSessions()
+      const restoredPrompt = typeof result.restored_prompt === 'string' && result.restored_prompt.trim()
+        ? result.restored_prompt
+        : undefined
+      return {
+        ok: true,
+        ...(restoredPrompt !== undefined ? { restoredPrompt } : {}),
+        ...(result.external_acp === true ? { externalAcp: true } : {}),
+      }
+    } catch (error) {
+      return { ok: false, error: desktopError(error) }
+    }
+  }
+
+  /** List chats available for read-only import from Antigravity, Claude Code, Codex, and connected ACP runtimes. */
+  async listImportableExternalSessions(params: {
+    readonly runtime?: string
+    readonly allProjects?: boolean
+    readonly query?: string
+    readonly limit?: number
+  } = {}): Promise<{
+    readonly ok: boolean
+    readonly error?: string
+    readonly cwd?: string
+    readonly sessions: readonly ExternalImportableSessionRow[]
+    readonly runtimes: readonly ExternalImportableRuntimeSummary[]
+  }> {
+    try {
+      const result = await this.bridge.call('acp.importable_sessions', {
+        ...(this.frame.cwd ? { cwd: this.frame.cwd } : {}),
+        ...(params.runtime ? { runtime: params.runtime } : {}),
+        ...(params.allProjects ? { all_projects: true } : {}),
+        ...(params.query ? { query: params.query } : {}),
+        ...(params.limit !== undefined ? { limit: params.limit } : {}),
+      })
+      if (result.ok === false) {
+        return { ok: false, error: str(result.error) || 'Could not list external runtime chats.', sessions: [], runtimes: [] }
+      }
+      const rawSessions = Array.isArray(result.sessions) ? result.sessions : []
+      const sessions: ExternalImportableSessionRow[] = []
+      for (const item of rawSessions) {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+        const row = item as Readonly<Record<string, unknown>>
+        const id = str(row.id)
+        const runtimeId = str(row.runtime_id)
+        if (!id || !runtimeId) continue
+        sessions.push({
+          id,
+          runtimeId,
+          runtimeName: str(row.runtime_name) || runtimeId,
+          provider: parseAcpProvider(row.provider),
+          title: str(row.title) || `${runtimeId} ${id.slice(0, 8)}`,
+          cwd: str(row.cwd),
+          updatedAt: str(row.updated_at),
+          ...(str(row.preview) ? { preview: str(row.preview) } : {}),
+          ...(str(row.model) ? { model: str(row.model) } : {}),
+          ...(str(row.thought_level) ? { thoughtLevel: str(row.thought_level) } : {}),
+          ...(typeof row.turn_count === 'number' ? { turnCount: row.turn_count } : {}),
+          ...(str(row.source) ? { source: str(row.source) } : {}),
+          ...(row.already_imported === true ? { alreadyImported: true } : {}),
+        })
+      }
+      const rawRuntimes = Array.isArray(result.runtimes) ? result.runtimes : []
+      const runtimes: ExternalImportableRuntimeSummary[] = []
+      for (const item of rawRuntimes) {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+        const row = item as Readonly<Record<string, unknown>>
+        const id = str(row.id)
+        if (!id) continue
+        runtimes.push({
+          id,
+          name: str(row.name) || id,
+          provider: parseAcpProvider(row.provider),
+          available: row.available === true,
+          count: typeof row.count === 'number' ? row.count : 0,
+        })
+      }
+      const cwd = str(result.cwd)
+      return {
+        ok: true,
+        ...(cwd ? { cwd } : {}),
+        sessions,
+        runtimes,
+      }
+    } catch (error) {
+      return { ok: false, error: desktopError(error), sessions: [], runtimes: [] }
+    }
+  }
+
+  /** Import an external runtime chat (with full history) into a fresh Xerxes session and open it. */
+  async importExternalSession(params: {
+    readonly runtimeId: string
+    readonly externalSessionId: string
+    readonly cwd?: string
+    readonly title?: string
+    readonly source?: string
+    readonly connect?: boolean
+  }): Promise<{
+    readonly ok: boolean
+    readonly error?: string
+    readonly sessionId?: string
+    readonly title?: string
+    readonly importedTurns?: number
+    readonly connected?: boolean
+    readonly warning?: string
+  }> {
+    try {
+      const result = await this.bridge.call('acp.import_session', {
+        runtime_id: params.runtimeId,
+        external_session_id: params.externalSessionId,
+        ...(params.cwd ? { cwd: params.cwd } : this.frame.cwd ? { cwd: this.frame.cwd } : {}),
+        ...(params.title ? { title: params.title } : {}),
+        ...(params.source ? { source: params.source } : {}),
+        ...(params.connect !== undefined ? { connect: params.connect } : {}),
+      })
+      if (result.ok !== true) {
+        return { ok: false, error: str(result.error) || 'Could not import chat from external runtime.' }
+      }
+      const sessionId = str(result.session_id)
+      const title = str(result.title)
+      const importedCwd = str(result.cwd)
+      await this.refreshSessions()
+      if (sessionId) {
+        await this.openSession(sessionId, {
+          id: sessionId,
+          key: str(result.session_key) || sessionId,
+          kind: 'main',
+          title: title || sessionId,
+          status: 'idle',
+          age: 'now',
+          current: false,
+          turns: typeof result.imported_turns === 'number' ? result.imported_turns : 0,
+          messages: typeof result.imported_messages === 'number' ? result.imported_messages : 0,
+          cwd: importedCwd || this.frame.cwd,
+          untitled: false,
+        })
+      }
+      return {
+        ok: true,
+        ...(sessionId ? { sessionId } : {}),
+        ...(title ? { title } : {}),
+        ...(typeof result.imported_turns === 'number' ? { importedTurns: result.imported_turns } : {}),
+        ...(typeof result.connected === 'boolean' ? { connected: result.connected } : {}),
+        ...(str(result.warning) ? { warning: str(result.warning) } : {}),
+      }
+    } catch (error) {
+      return { ok: false, error: desktopError(error) }
+    }
   }
 
   // ── Settings data ────────────────────────────────────────────────────

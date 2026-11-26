@@ -31,10 +31,15 @@ import {
   bridgeEventFromAcpClientEvent,
   classifyAcpRuntimeFeatures,
   ClaudeStreamJsonRunner,
+  CodexExecJsonRunner,
   DEFAULT_CLAUDE_CODE_MODELS,
+  DEFAULT_CODEX_MODELS,
+  DEFAULT_CODEX_MODES,
+  DEFAULT_CODEX_THOUGHT_LEVELS,
   discoverExternalAcpAgents,
   isAcpTurboMode,
   isUnrestrictedAcpModeId,
+  readCodexConfigDefaults,
   resolveExecutablePath,
   splitCommandString,
   type AcpBridgeStreamEvent,
@@ -49,6 +54,7 @@ import {
   type AcpSessionBinding,
   type AcpToolMetaSnapshot,
   type ClaudeStreamJsonRunnerOptions,
+  type CodexExecJsonRunnerOptions,
   type DiscoverExternalAcpAgentsOptions,
 } from '../acp/externalAgents.js'
 import { isAcpRecord } from '../acp/types.js'
@@ -89,6 +95,8 @@ export interface DaemonAcpBridgeHostOptions {
   readonly createAcpClient?: (options: AcpStdioClientOptions) => AcpStdioClient
   /** Test seam to override Claude stream-json runner construction. */
   readonly createClaudeRunner?: (options: ClaudeStreamJsonRunnerOptions) => ClaudeStreamJsonRunner
+  /** Test seam to override Codex exec-json runner construction. */
+  readonly createCodexRunner?: (options: CodexExecJsonRunnerOptions) => CodexExecJsonRunner
   /** Session-level fallback elicitation handler for out-of-turn ACP wakeups. */
   readonly defaultCreateElicitation?: AcpDefaultCreateElicitationHandler
   /** Session-level fallback permission handler for out-of-turn ACP wakeups. */
@@ -515,6 +523,14 @@ interface ActiveClaudeSession {
   readonly runner: ClaudeStreamJsonRunner
 }
 
+interface ActiveCodexSession {
+  activeAbort: AbortController | undefined
+  binding: AcpSessionBinding
+  readonly kind: 'codex-exec-json'
+  lastRawCommands: readonly AcpAvailableCommand[]
+  readonly runner: CodexExecJsonRunner
+}
+
 interface LastAcpAuthChallenge {
   readonly agentId: string
   readonly args: readonly string[]
@@ -524,7 +540,7 @@ interface LastAcpAuthChallenge {
   readonly provider: AcpExternalAgentProvider
 }
 
-type ActiveExternalSession = ActiveAcpSession | ActiveClaudeSession
+type ActiveExternalSession = ActiveAcpSession | ActiveClaudeSession | ActiveCodexSession
 
 /**
  * Daemon-owned host managing per-session external ACP & Claude Code bridges.
@@ -755,7 +771,7 @@ export class DaemonAcpBridgeHost {
       return {
         ok: false,
         error: `Unknown ACP agent "${agentId}".`,
-        install_hint: 'Use "xerxes", "claude-code", "antigravity", or specify a custom command.',
+        install_hint: 'Use "xerxes", "claude-code", "antigravity", "codex", or specify a custom command.',
       }
     }
 
@@ -900,6 +916,104 @@ export class DaemonAcpBridgeHost {
       return { ok: true, binding }
     }
 
+    if (resolvedDiscovered.transport === 'codex-exec-json') {
+      const binaryPath = resolvedDiscovered.binaryPath ?? resolvedDiscovered.command ?? ''
+      if (!binaryPath) {
+        return {
+          ok: false,
+          error: `${resolvedDiscovered.name} binary path could not be resolved.`,
+          ...(resolvedDiscovered.installHint ? { install_hint: resolvedDiscovered.installHint } : {}),
+        }
+      }
+      if (!this.options.createCodexRunner && !this.resolveCommandBinary(binaryPath)) {
+        return {
+          ok: false,
+          error: `${resolvedDiscovered.name} binary is no longer executable at "${binaryPath}".`,
+          ...(resolvedDiscovered.installHint ? { install_hint: resolvedDiscovered.installHint } : {}),
+        }
+      }
+      await this.disconnect(sessionId, { keepGeneration: true })
+      if (this.connectGenerations.get(sessionId) !== connectGen) {
+        return { ok: false, error: 'Connection superseded by a newer request.' }
+      }
+      const configDefaults = readCodexConfigDefaults({
+        ...(this.options.env ? { env: this.options.env } : {}),
+        ...(this.options.homeDir ? { homeDir: this.options.homeDir } : {}),
+      })
+      const initialModel = configDefaults.model || DEFAULT_CODEX_MODELS[0]?.id || 'gpt-5.4'
+      const initialThought = configDefaults.thoughtLevel || 'high'
+      const runnerOptions: CodexExecJsonRunnerOptions = {
+        binaryPath,
+        cwd,
+        model: initialModel,
+        thoughtLevel: initialThought,
+        ...(this.options.env ? { env: this.options.env } : {}),
+        ...(request.initialModeId ? { mode: request.initialModeId } : {}),
+        ...(request.permissionMode ? { permissionMode: request.permissionMode } : {}),
+        ...(request.resumeSessionId ? { resumeSessionId: request.resumeSessionId } : {}),
+      }
+      const runner = this.options.createCodexRunner
+        ? this.options.createCodexRunner(runnerOptions)
+        : new CodexExecJsonRunner(runnerOptions)
+      const models: readonly AcpExternalModelOption[] = DEFAULT_CODEX_MODELS.some(m => m.id === initialModel)
+        ? DEFAULT_CODEX_MODELS
+        : [{ id: initialModel, name: initialModel }, ...DEFAULT_CODEX_MODELS]
+      const currentMode = runner.getMode()
+      const currentModeName = DEFAULT_CODEX_MODES.find(m => m.id === currentMode)?.name ?? currentMode
+      const currentModelName = models.find(m => m.id === initialModel)?.name ?? initialModel
+      const codexCapabilities: AcpRuntimeCapabilities = {
+        prompt: { image: false, audio: false, embedded_context: false },
+        session: { load: false, resume: true, fork: false, list: false, close: false, additional_directories: false },
+        mcp: { http: false, sse: false },
+        auth_methods: [],
+      }
+      const binding: AcpSessionBinding = {
+        session_id: sessionId,
+        agent_id: resolvedDiscovered.id,
+        name: resolvedDiscovered.name,
+        provider: resolvedDiscovered.provider,
+        transport: 'codex-exec-json',
+        cwd,
+        ...(request.resumeSessionId ? { external_session_id: request.resumeSessionId } : {}),
+        connected: true,
+        command: binaryPath,
+        agent_title: resolvedDiscovered.name,
+        ...(resolvedDiscovered.version ? { agent_version: resolvedDiscovered.version } : {}),
+        capabilities: codexCapabilities,
+        models,
+        current_model: initialModel,
+        current_model_name: currentModelName,
+        modes: DEFAULT_CODEX_MODES,
+        current_mode: currentMode,
+        current_mode_name: currentModeName,
+        thought_level: initialThought,
+        thought_levels: DEFAULT_CODEX_THOUGHT_LEVELS,
+        thought_level_config_id: 'thought_level',
+        config_options: [
+          {
+            id: 'thought_level',
+            name: 'Reasoning Effort',
+            category: 'thought_level',
+            type: 'select',
+            current_value: initialThought,
+            options: DEFAULT_CODEX_THOUGHT_LEVELS.map(level => ({
+              value: level.id,
+              name: level.name,
+              ...(level.description ? { description: level.description } : {}),
+            })),
+          },
+        ],
+      }
+      this.active.set(sessionId, {
+        kind: 'codex-exec-json',
+        lastRawCommands: [],
+        runner,
+        binding,
+        activeAbort: undefined,
+      })
+      return { ok: true, binding }
+    }
+
     // Standard ACP stdio agent (claude-agent-acp, agy acp, antigravity-acp, custom config).
     const command = resolvedDiscovered.binaryPath ?? resolvedDiscovered.command ?? ''
     if (!command) {
@@ -1029,6 +1143,22 @@ export class DaemonAcpBridgeHost {
       return { ok: true, binding: existing.binding }
     }
 
+    if (existing.kind === 'codex-exec-json') {
+      existing.runner.setModel(targetModelId)
+      const baseModels = existing.binding.models ?? DEFAULT_CODEX_MODELS
+      const models = baseModels.some(item => item.id === targetModelId)
+        ? baseModels
+        : [{ id: targetModelId, name: targetModelId }, ...baseModels]
+      const matched = models.find(item => item.id === targetModelId)
+      existing.binding = {
+        ...existing.binding,
+        models,
+        current_model: targetModelId,
+        current_model_name: matched?.name ?? targetModelId,
+      }
+      return { ok: true, binding: existing.binding }
+    }
+
     try {
       const rpcResult = await existing.client.setModel({
         sessionId: existing.externalSessionId,
@@ -1075,6 +1205,19 @@ export class DaemonAcpBridgeHost {
     if (!existing || !existing.binding.connected) {
       return { ok: false, error: `No external ACP agent is connected for session "${sid}".` }
     }
+    if (existing.kind === 'codex-exec-json') {
+      existing.runner.setMode(targetModeId)
+      const resolvedMode = existing.runner.getMode()
+      const matched = DEFAULT_CODEX_MODES.find(item => item.id === resolvedMode)
+      existing.binding = {
+        ...existing.binding,
+        modes: DEFAULT_CODEX_MODES,
+        current_mode: resolvedMode,
+        current_mode_name: matched?.name ?? resolvedMode,
+      }
+      return { ok: true, binding: existing.binding }
+    }
+
     if (existing.kind !== 'acp') {
       return {
         ok: false,
@@ -1211,6 +1354,37 @@ export class DaemonAcpBridgeHost {
     if (existing.kind === 'claude-stream-json') {
       if (targetConfigId.toLowerCase() === 'model' && typeof normalizedValue === 'string') {
         return this.setModel(sid, normalizedValue)
+      }
+      return {
+        ok: false,
+        error: `${existing.binding.name} (${existing.binding.transport}) does not support ACP config option "${targetConfigId}".`,
+      }
+    }
+
+    if (existing.kind === 'codex-exec-json') {
+      const lowerCfg = targetConfigId.toLowerCase()
+      if (lowerCfg === 'model' && typeof normalizedValue === 'string') {
+        return this.setModel(sid, normalizedValue)
+      }
+      if (lowerCfg === 'mode' && typeof normalizedValue === 'string') {
+        return this.setMode(sid, normalizedValue)
+      }
+      if (
+        (lowerCfg === 'thought_level' || lowerCfg === 'reasoning_effort' || lowerCfg === 'thinking_level')
+        && typeof normalizedValue === 'string'
+      ) {
+        existing.runner.setThoughtLevel(normalizedValue)
+        const level = existing.runner.getThoughtLevel() ?? normalizedValue
+        existing.binding = {
+          ...existing.binding,
+          thought_level: level,
+          thought_levels: DEFAULT_CODEX_THOUGHT_LEVELS,
+          thought_level_config_id: 'thought_level',
+          config_options: (existing.binding.config_options ?? []).map(opt =>
+            opt.id === 'thought_level' ? { ...opt, current_value: level } : opt,
+          ),
+        }
+        return { ok: true, binding: existing.binding }
       }
       return {
         ok: false,

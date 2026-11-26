@@ -92,6 +92,7 @@ import { RightPanelLauncher } from './RightPanelLauncher.js'
 import { T3ModelPicker } from './T3ModelPicker.js'
 import { ProjectMonogram } from './ProjectMonogram.js'
 import { T3Icon } from './T3Icons.js'
+import { ActionDialog } from './ActionDialog.js'
 import {
   isSnoozedActive,
   setSettledInState,
@@ -2311,6 +2312,48 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
   // The failed card and pending question own the tail of the feed even when
   // the transcript itself is still empty — an empty welcome must not bury
   // the thing asking for a decision.
+  const [rewindTarget, setRewindTarget] = useState<RewindTarget | null>(null)
+  const [rewindRestorePrompt, setRewindRestorePrompt] = useState(true)
+  const [rewindBusy, setRewindBusy] = useState(false)
+  const [rewindError, setRewindError] = useState<string | null>(null)
+  const isExternalAcp = Boolean(
+    (snap.acpBinding && snap.acpBinding.transport !== 'native')
+    || (snap.savedAcpBinding && snap.savedAcpBinding.transport !== 'native'),
+  )
+  const openRewindDialog = useCallback((target: RewindTarget): void => {
+    setRewindTarget(target)
+    setRewindError(null)
+    const trimmed = target.text.trim()
+    setRewindRestorePrompt(Boolean(trimmed && trimmed !== 'Continue after the runtime restart'))
+  }, [])
+  const rewindCtx = useMemo(
+    () => ({ disabled: snap.turnActive || snap.connection !== 'online', onRequest: openRewindDialog }),
+    [snap.turnActive, snap.connection, openRewindDialog],
+  )
+  const confirmRewind = async (): Promise<void> => {
+    if (!rewindTarget || rewindBusy) return
+    setRewindBusy(true)
+    setRewindError(null)
+    try {
+      const result = await store.rewindToMessage({
+        ...(rewindTarget.messageIndex !== undefined ? { messageIndex: rewindTarget.messageIndex } : {}),
+        ...(rewindTarget.text ? { text: rewindTarget.text } : {}),
+        inclusive: true,
+      })
+      if (!result.ok) {
+        setRewindError(result.error || 'Could not rewind this conversation.')
+        return
+      }
+      const restore = rewindRestorePrompt ? (result.restoredPrompt ?? rewindTarget.text.trim()) : ''
+      setRewindTarget(null)
+      if (restore && restore !== 'Continue after the runtime restart') {
+        prefillComposerPrompt(restore)
+      }
+    } finally {
+      setRewindBusy(false)
+    }
+  }
+
   return (
     // Focusable and named: the transcript is the main content of the
     // window and had no way to reach it by keyboard or name it to a screen
@@ -2318,6 +2361,7 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
     // token-level streaming announces continuously; the Announcer below
     // reports the transitions that actually matter instead.
     <ReplyEnds.Provider value={ends}>
+    <RewindContext.Provider value={rewindCtx}>
     <div className={`stream${empty && !failedCard && !question && !approval ? ' stream--welcome' : ''}`} ref={ref} tabIndex={0} role="region" aria-label="Conversation">
       {empty && !failedCard && !question && !approval ? <>
         {blocks.length > 0 && <div className="welcome-notices" aria-live="polite">{blocks.map(block => <BlockView key={block.id} block={block} />)}</div>}
@@ -2376,6 +2420,43 @@ function Stream({ snap }: { snap: Snapshot }): ReactElement {
         </div>
       )}
     </div>
+    {rewindTarget && (
+      <ActionDialog
+        title="Rewind conversation?"
+        confirmLabel="Rewind"
+        busyLabel="Rewinding…"
+        busy={rewindBusy}
+        destructive
+        {...(rewindError ? { error: rewindError } : {})}
+        onCancel={() => { if (!rewindBusy) { setRewindTarget(null); setRewindError(null) } }}
+        onConfirm={() => void confirmRewind()}
+      >
+        <p>Removes this message and every reply after it from this conversation.</p>
+        {rewindTarget.text.trim() && (
+          <blockquote className="rewind-dialog__preview">
+            {rewindTarget.text.trim().length > 220
+              ? `${rewindTarget.text.trim().slice(0, 219)}…`
+              : rewindTarget.text.trim()}
+          </blockquote>
+        )}
+        {rewindTarget.text.trim() && rewindTarget.text.trim() !== 'Continue after the runtime restart' && (
+          <label className="rewind-dialog__check">
+            <input
+              type="checkbox"
+              checked={rewindRestorePrompt}
+              onChange={event => setRewindRestorePrompt(event.currentTarget.checked)}
+            />
+            <span>Put message back in the composer to edit and resend</span>
+          </label>
+        )}
+        {isExternalAcp && (
+          <p className="rewind-dialog__note">
+            For external runtimes, this rewinds the Xerxes transcript and clears local errors.
+          </p>
+        )}
+      </ActionDialog>
+    )}
+    </RewindContext.Provider>
     </ReplyEnds.Provider>
   )
 }
@@ -2553,14 +2634,33 @@ export function replyEnds(blocks: Snapshot['blocks'], turnActive: boolean): Read
 
 const ReplyEnds = createContext<ReadonlyMap<number, { readonly text: string; readonly latest: boolean }>>(new Map())
 
+export interface RewindTarget {
+  readonly messageIndex?: number
+  readonly text: string
+}
+
+const RewindContext = createContext<{
+  readonly disabled: boolean
+  readonly onRequest: (target: RewindTarget) => void
+} | null>(null)
+
 function ReplyActionRow({ blockId }: { blockId: number }): ReactElement | null {
   const end = useContext(ReplyEnds).get(blockId)
   if (!end) return null
   return <div className={`msg__actions msg__actions--reply${end.latest ? ' is-latest' : ''}`}><CopyButton icon text={end.text} label="Copy reply" /></div>
 }
 
-const UserMessage = memo(function UserMessage({ text, images = [] }: { text: string; images?: readonly string[] }): ReactElement {
+const UserMessage = memo(function UserMessage({
+  text,
+  images = [],
+  messageIndex,
+}: {
+  text: string
+  images?: readonly string[]
+  messageIndex?: number
+}): ReactElement {
   const [expanded, setExpanded] = useState(false)
+  const rewind = useContext(RewindContext)
   const long = text.length > 1600 || text.split('\n').length > 16
   // The wrapper carries the bubble's right alignment so the copy row can sit
   // under the bubble rather than inside it.
@@ -2572,7 +2672,25 @@ const UserMessage = memo(function UserMessage({ text, images = [] }: { text: str
       <div className={`msg__text${long && !expanded ? ' msg__text--preview' : ''}`}>{text}</div>
       {long && <button type="button" className="message-expand" aria-expanded={expanded} onClick={() => setExpanded(value => !value)}>{expanded ? 'Show less' : 'Show full message'}</button>}
     </div>}
-    <div className="msg__actions"><CopyButton icon text={text} label="Copy message" /></div>
+    <div className="msg__actions">
+      {rewind && (
+        <button
+          type="button"
+          className="copybtn copybtn--icon msg__rewind-btn"
+          disabled={rewind.disabled}
+          aria-label="Rewind to before this message"
+          title={rewind.disabled ? 'Stop the active turn before rewinding' : 'Rewind conversation to before this message'}
+          onClick={event => {
+            event.stopPropagation()
+            event.preventDefault()
+            rewind.onRequest({ ...(messageIndex !== undefined ? { messageIndex } : {}), text })
+          }}
+        >
+          <T3Icon name="undo" size={14} />
+        </button>
+      )}
+      <CopyButton icon text={text} label="Copy message" />
+    </div>
   </div>
 })
 
@@ -2599,7 +2717,13 @@ export const BlockView = memo(function BlockView({ block }: { block: Snapshot['b
   }
   if (block.kind === 'user') {
     if (block.contextSummary) return <details className="context-summary"><summary>Earlier conversation summary</summary><Markdown text={block.text} /></details>
-    return <UserMessage text={block.text} {...(block.images ? { images: block.images } : {})} />
+    return (
+      <UserMessage
+        text={block.text}
+        {...(block.images ? { images: block.images } : {})}
+        {...(block.messageIndex !== undefined ? { messageIndex: block.messageIndex } : {})}
+      />
+    )
   }
   if (block.kind === 'agent') {
     return (
@@ -3143,6 +3267,7 @@ export function withoutDuplicateFailure(blocks: readonly Block[], error: string)
 
 export function FailedCard({ failed }: { failed: NonNullable<Snapshot['failed']> }): ReactElement {
   const [compacting, setCompacting] = useState(false)
+  const [rewinding, setRewinding] = useState(false)
   // The old check only knew about credentials, so the single most common
   // recoverable failure — a provider usage limit — rendered as raw JSON
   // with a unix timestamp and offered a Retry that could only fail again.
@@ -3167,6 +3292,25 @@ export function FailedCard({ failed }: { failed: NonNullable<Snapshot['failed']>
             >
               <Icon name="retry" size={13} /> Retry
             </button>}
+        <button
+          type="button"
+          className="btn"
+          disabled={rewinding}
+          title="Remove the failed turn from this conversation"
+          onClick={async () => {
+            setRewinding(true)
+            try {
+              const res = await store.rewindToMessage({ inclusive: true })
+              if (res.ok && res.restoredPrompt && res.restoredPrompt !== 'Continue after the runtime restart') {
+                prefillComposerPrompt(res.restoredPrompt)
+              }
+            } finally {
+              setRewinding(false)
+            }
+          }}
+        >
+          <T3Icon name="undo" size={13} /> {rewinding ? 'Rewinding…' : 'Rewind last turn'}
+        </button>
         <button className="btn btn--ghost" onClick={() => store.resolveFailure()}>Dismiss</button>
       </div>
     </div>

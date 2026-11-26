@@ -8,9 +8,18 @@ import { join } from 'node:path'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 
-import { FilesChangedCard, Shell, Sidebar } from '../src/desktop/renderer/App.js'
-import { T3ModelPicker, compactModelTriggerName, reasoningLevelLabel } from '../src/desktop/renderer/T3ModelPicker.js'
+import { FailedCard, FilesChangedCard, Shell, Sidebar, Stream } from '../src/desktop/renderer/App.js'
+import {
+  FAVORITE_EFFORTS_KEY,
+  T3ModelPicker,
+  compactModelTriggerName,
+  favoriteEffortKey,
+  preferredFavoriteEffort,
+  reasoningLevelLabel,
+  toggleFavoriteThinkingEffort,
+} from '../src/desktop/renderer/T3ModelPicker.js'
 import { T3Sidebar, brandProviderOf, groupSectionsByMachine } from '../src/desktop/renderer/T3Sidebar.js'
+import { ImportChatModal } from '../src/desktop/renderer/ImportChatModal.js'
 import { localMachineLabel } from '../src/desktop/renderer/runModeView.js'
 import { ThreadDetailsCard } from '../src/desktop/renderer/ThreadDetailsCard.js'
 import { RightPanelLauncher, XERXES_SURFACES } from '../src/desktop/renderer/RightPanelLauncher.js'
@@ -914,5 +923,125 @@ describe('T3 Code Shell, Sidebar V2, Breadcrumb Header & Panels', () => {
     expect(localOnlyHtml).not.toContain('· This Mac')
     expect(localOnlyHtml).toContain('data-brand-provider="xerxes"')
     expect(localOnlyHtml.match(HEX_RE) ?? []).toEqual([])
+  })
+
+  test('T3ModelPicker supports starring favorite thinking efforts and Stream/FailedCard expose message rewind', () => {
+    expect(FAVORITE_EFFORTS_KEY).toBe('xerxes.desktop.favoriteThinkingEfforts.v1')
+    const afterStar = toggleFavoriteThinkingEffort([], 'antigravity', 'MODEL_4_NEON', 'xhigh')
+    expect(afterStar).toEqual([favoriteEffortKey('antigravity', 'MODEL_4_NEON', 'xhigh')])
+    expect(preferredFavoriteEffort(afterStar, 'antigravity', 'MODEL_4_NEON', ['low', 'high', 'xhigh'])).toBe('xhigh')
+    const afterSecond = toggleFavoriteThinkingEffort(afterStar, 'antigravity', 'MODEL_4_NEON', 'high')
+    expect(preferredFavoriteEffort(afterSecond, 'antigravity', 'MODEL_4_NEON', ['low', 'high', 'xhigh'])).toBe('high')
+    const afterUnstar = toggleFavoriteThinkingEffort(afterSecond, 'antigravity', 'MODEL_4_NEON', 'high')
+    expect(preferredFavoriteEffort(afterUnstar, 'antigravity', 'MODEL_4_NEON', ['low', 'high', 'xhigh'])).toBe('xhigh')
+
+    const pickerSnap = makeSnapshot({
+      acpBinding: {
+        session_id: 'thr-1',
+        agent_id: 'antigravity',
+        name: 'Antigravity',
+        provider: 'antigravity',
+        transport: 'acp',
+        cwd: '/workspace/Xerxes-Agents',
+        connected: true,
+        current_model: 'MODEL_4_NEON',
+        current_model_name: 'Gemini 4 Neon',
+        models: [{ id: 'MODEL_4_NEON', name: 'Gemini 4 Neon' }],
+        thought_level: 'high',
+        thought_levels: [
+          { id: 'low', name: 'Low' },
+          { id: 'high', name: 'High' },
+          { id: 'xhigh', name: 'Extra high' },
+        ],
+      },
+    })
+    const pickerHtml = renderToStaticMarkup(createElement(T3ModelPicker, { snap: pickerSnap, defaultOpen: true }))
+    expect(pickerHtml).toContain('aria-label="Favorite Low thinking effort"')
+    expect(pickerHtml).toContain('aria-label="Favorite High thinking effort"')
+    expect(pickerHtml).toContain('aria-label="Favorite Extra high thinking effort"')
+    expect(pickerHtml).toContain('t3-mpop__effort-star')
+    expect(pickerHtml.match(HEX_RE) ?? []).toEqual([])
+
+    const streamSnap = makeSnapshot({
+      blocks: [
+        { kind: 'user', id: 1, text: 'Run single-pass 1k step', messageIndex: 0 },
+        { kind: 'agent', id: 2, text: 'Done.', streaming: false },
+      ],
+      failed: { error: 'Client claude-code: Prompt is too long', turn: 75, lastUser: 'Continue after the runtime restart' },
+    })
+    const streamHtml = renderToStaticMarkup(createElement(Stream, { snap: streamSnap }))
+    expect(streamHtml).toContain('aria-label="Rewind to before this message"')
+    expect(streamHtml).toContain('aria-label="Copy message"')
+    expect(streamHtml).toContain('Rewind last turn')
+    expect(streamHtml.match(HEX_RE) ?? []).toEqual([])
+
+    const failedHtml = renderToStaticMarkup(
+      createElement(FailedCard, { failed: { error: 'Prompt is too long', turn: 75, lastUser: '' } }),
+    )
+    expect(failedHtml).toContain('Rewind last turn')
+    expect(failedHtml).toContain('Retry')
+    expect(failedHtml).toContain('Dismiss')
+    expect(failedHtml.match(HEX_RE) ?? []).toEqual([])
+  })
+
+  test('ImportChatModal and T3ModelPicker expose cross-runtime chat import and Codex ACP rail with zero inline hexes', () => {
+    const pickerSnap = makeSnapshot({
+      acpAgents: [
+        { id: 'xerxes', name: 'Xerxes', provider: 'xerxes', transport: 'native', available: true, description: 'Native' },
+        { id: 'claude-code', name: 'Claude Code', provider: 'claude-code', transport: 'claude-stream-json', available: true, description: 'Claude' },
+        { id: 'antigravity', name: 'Antigravity', provider: 'antigravity', transport: 'acp', available: true, description: 'AGY' },
+        { id: 'codex', name: 'Codex', provider: 'codex', transport: 'codex-exec-json', available: true, description: 'Codex' },
+      ],
+    })
+    const pickerHtml = renderToStaticMarkup(createElement(T3ModelPicker, { snap: pickerSnap, defaultOpen: true }))
+    expect(pickerHtml).toContain('data-brand-provider="codex"')
+    expect(pickerHtml).toContain('Import chat')
+    expect(pickerHtml.match(HEX_RE) ?? []).toEqual([])
+
+    const modalHtml = renderToStaticMarkup(
+      createElement(ImportChatModal, {
+        open: true,
+        currentCwd: '/home/erfan/easydel-src',
+        onClose: () => {},
+        initialRuntimes: [
+          { id: 'antigravity', name: 'Antigravity', provider: 'antigravity', available: true, count: 1 },
+          { id: 'claude-code', name: 'Claude Code', provider: 'claude-code', available: true, count: 1 },
+          { id: 'codex', name: 'Codex', provider: 'codex', available: true, count: 1 },
+        ],
+        initialSessions: [
+          {
+            id: '11111111-2222-3333-4444-555555555555',
+            runtimeId: 'antigravity',
+            runtimeName: 'Antigravity',
+            provider: 'antigravity',
+            title: 'Transforming Qwen Into Loop Transformer',
+            cwd: '/home/erfan/easydel-src',
+            updatedAt: new Date().toISOString(),
+            model: 'gemini-4-neon-high',
+            turnCount: 74,
+            preview: 'Verified all shards and launched single-pass 1k step run.',
+          },
+          {
+            id: '99999999-8888-7777-6666-555555555555',
+            runtimeId: 'codex',
+            runtimeName: 'Codex',
+            provider: 'codex',
+            title: 'Optimize JAX kernel',
+            cwd: '/home/erfan/easydel-src',
+            updatedAt: new Date().toISOString(),
+            model: 'gpt-5.4',
+            turnCount: 5,
+            alreadyImported: true,
+          },
+        ],
+      }),
+    )
+    expect(modalHtml).toContain('Import chat from runtime')
+    expect(modalHtml).toContain('Transforming Qwen Into Loop Transformer')
+    expect(modalHtml).toContain('Optimize JAX kernel')
+    expect(modalHtml).toContain('74 turns')
+    expect(modalHtml).toContain('Re-import')
+    expect(modalHtml).toContain('Import by session ID…')
+    expect(modalHtml.match(HEX_RE) ?? []).toEqual([])
   })
 })

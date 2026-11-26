@@ -256,6 +256,7 @@ params fall back to per-connection defaults.
 | `session.title`         | `{ session_key?, title \| value }`                            | `{ ok, ... }`                                              | Rename the named (default: attached) session; also emits `session_title`. Like `session.save`, `session.undo`, `session.compress`, `changes.undo` and `workspace.worktree`, it never re-binds the connection to `session_key`. |
 | `session.save`          | `{ session_key?, title? }`                                   | `{ ok, ... }`                                              | Persist the active session under an explicit title.                                                                                                |
 | `session.undo`          | `{ session_key? }`                                           | `{ ok, ... }`                                              | Discard the last completed turn from the transcript. Not a filesystem undo — see `changes.undo`.                                                   |
+| `session.rewind`        | `{ session_key?, message_index?, match_text?, inclusive? }`  | `{ ok, dropped, remaining_messages, turn_count, restored_prompt, external_acp, session }` | Rewind the transcript to a specific user message (`message_index` and/or `match_text`, defaulting to the last user turn). `inclusive` defaults to `true` (drops the target user message and everything after it and returns `restored_prompt` for editing; `false` keeps the target user message and drops everything after it). Refused while a turn is running. Not a filesystem undo. |
 | `session.delete`        | `{ session_id \| id \| key }`                                 | `{ ok, ... }`                                              | Delete a saved session; a live session is evicted first.                                                                                           |
 | `session.most_recent`   | `{ project_dir? }`                                           | `{ ok, session? }`                                         | Newest saved session in the resolved project boundary; used by resume-last.                                                                        |
 | `session.compress`      | `{ session_key? }`                                           | `{ ok, ... }`                                              | Provider-backed compaction on demand. Progress surfaces as `status_update` plus slash `notification`s, not as `compaction_begin`/`compaction_end`. |
@@ -2958,9 +2959,13 @@ clients without entering the foreground transcript.
 
 Session-scoped external agent bridge supporting **Claude Code** (native ACP
 bridge or official `claude` CLI `stream-json`), **Google Antigravity**
-(`antigravity-acp`, `agy acp`, or `antigravity acp`), and custom stdio ACP
-agents (`~/.xerxes/acp-agents.json` or explicit command). All eleven RPCs bypass
-the foreground turn queue; `acp.agents`, `acp.catalog`, and `acp.sessions` are read-only.
+(`antigravity-acp`, `agy acp`, or `antigravity acp`), **OpenAI Codex**
+(`codex-acp` / `@agentclientprotocol/codex-acp`, `XERXES_CODEX_ACP_CMD`, or
+official `codex exec --json` / `codex exec resume`), and custom stdio ACP
+agents (`~/.xerxes/acp-agents.json` or explicit command). All read-only and
+lifecycle ACP RPCs bypass the foreground turn queue (`acp.agents`,
+`acp.catalog`, `acp.sessions`, and `acp.importable_sessions` are read-only;
+`acp.import_session` runs serialized).
 
 - `acp.agents` `{ session_id?, session_key? }` → `{ ok: true, agents: AcpExternalAgentInfo[], active: AcpSessionBinding | null }`.
 - `acp.catalog` `{ session_id?, session_key? }`
@@ -3034,6 +3039,17 @@ the foreground turn queue; `acp.agents`, `acp.catalog`, and `acp.sessions` are r
   → `{ ok: true, sessions: AcpListedSession[], next_cursor?: string }` or `{ ok: false, error: string }`.
   Lists resumable external ACP sessions via `session/list` when advertised by
   the connected agent.
+- `acp.importable_sessions` `{ runtime?, cwd?, all_projects?, query?, limit? }`
+  → `{ ok: true, cwd, sessions: ExternalImportableSession[], runtimes: Array<{ id, name, provider, available, count }> }`.
+  Strictly read-only discovery of importable chat histories across external
+  runtimes (Antigravity brain logs, Claude Code project transcripts, Codex
+  SQLite/rollout transcripts, plus live ACP `session/list` when connected).
+- `acp.import_session` `{ runtime_id, external_session_id, cwd?, title?, connect?, source?, command? }`
+  → `{ ok: true, session_id, session_key, title, cwd, imported_messages, imported_turns, connected, warning?, session }` or `{ ok: false, error: string }`.
+  Creates a fresh Xerxes session hydrated with the full chronological transcript
+  from the chosen external runtime (via ACP `session/load` replay or read-only
+  transcript import), pins `session.metadata.acp_binding` to that runtime and
+  `external_session_id`, and optionally connects the live external runtime.
 - `acp.fork` `{ session_id?, session_key?, cwd? }`
   → `{ ok: true, binding: AcpSessionBinding }` or `{ ok: false, error: string }`.
   Forks the connected external ACP session via `session/fork`, updates

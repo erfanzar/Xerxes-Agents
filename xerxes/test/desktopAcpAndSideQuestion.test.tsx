@@ -799,7 +799,7 @@ describe('External ACP Agent Runtime Switcher (Store, Desktop & VS Code)', () =>
 
   test('parseCustomArgs and resolveRuntimeList handle quotes and fallback defaults cleanly', () => {
     expect(parseCustomArgs('acp --cwd "/tmp/my app" --stdio')).toEqual(['acp', '--cwd', '/tmp/my app', '--stdio'])
-    expect(resolveRuntimeList([]).map(a => a.id)).toEqual(['xerxes', 'claude-code', 'antigravity'])
+    expect(resolveRuntimeList([]).map(a => a.id)).toEqual(['xerxes', 'claude-code', 'antigravity', 'codex'])
   })
 
   test('AcpRuntimePicker, AcpActiveBanner, Welcome brand emblem, ActivityGroup, and VscodeChat render cleanly', () => {

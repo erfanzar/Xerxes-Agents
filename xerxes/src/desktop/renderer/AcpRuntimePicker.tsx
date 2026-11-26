@@ -68,6 +68,15 @@ export const DEFAULT_ACP_AGENTS: readonly AcpExternalAgentInfo[] = [
     installHint: 'Install Antigravity CLI (`agy`) so `agy acp` is on PATH, or set XERXES_ANTIGRAVITY_ACP_CMD',
     description: 'Google Antigravity via ACP stdio',
   },
+  {
+    id: 'codex',
+    name: 'Codex',
+    provider: 'codex',
+    transport: 'acp',
+    available: false,
+    installHint: 'Install `@agentclientprotocol/codex-acp` (`codex-acp`) or `@openai/codex` (`codex`), or set XERXES_CODEX_ACP_CMD',
+    description: 'OpenAI Codex via ACP / exec JSON',
+  },
 ]
 
 /** Merge discovered agents from `acp.agents` with the core Xerxes / Claude Code / Antigravity catalog. */
@@ -93,6 +102,7 @@ export function resolveRuntimeList(
 export function transportBadgeLabel(transport: AcpExternalAgentInfo['transport']): string {
   if (transport === 'native') return 'Native'
   if (transport === 'claude-stream-json') return 'stream-json'
+  if (transport === 'codex-exec-json') return 'exec-json'
   return 'ACP'
 }
 

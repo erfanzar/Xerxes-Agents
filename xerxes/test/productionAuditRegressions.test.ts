@@ -8,8 +8,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { AcpStdioClient, type AcpClientEvent, type AcpSpawnedProcess } from '../src/acp/client.js'
-import { discoverExternalAcpAgents } from '../src/acp/externalAgents.js'
+import { CodexExecJsonRunner, discoverExternalAcpAgents, type AcpBridgeStreamEvent } from '../src/acp/externalAgents.js'
 import { DaemonAcpBridgeHost } from '../src/daemon/acpBridgeHost.js'
+import {
+  cleanAgyUserPromptText,
+  discoverImportableExternalSessions,
+  loadExternalSessionTranscript,
+} from '../src/daemon/externalSessionImporter.js'
 import { ConnectionLeases } from '../src/daemon/connectionLease.js'
 import { LOCAL_PROVIDER_BINDING, RemoteProviderBindings } from '../src/daemon/remoteProviderBindings.js'
 import { InMemoryDaemonRuntime } from '../src/daemon/runtime.js'
@@ -1114,6 +1119,670 @@ describe('SSH & remote performance regressions — wire history budget & direct 
       })
     } finally {
       ;(globalThis as { window?: unknown }).window = prev
+    }
+  })
+
+  test('strict session runtime/model pinning blocks disconnected external ACP fallback and restart auto-resume', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'xerxes-pin-guard-'))
+    const sessionsDir = join(dir, 'sessions')
+    const socketPath = join(dir, 'daemon.sock')
+    let nativeTurnRuns = 0
+    const runtime = new InMemoryDaemonRuntime(
+      {
+        async *run() {
+          nativeTurnRuns += 1
+          yield { type: 'text_part', payload: { text: 'native reply' } }
+        },
+      },
+      {
+        model: 'pinned-native-model',
+        currentProjectDirectory: dir,
+        sessionDirectory: sessionsDir,
+      },
+    )
+    runtime.reload({ provider_profile: 'native-prof', model: 'pinned-native-model' })
+    const server = new DaemonServer({
+      runtime,
+      socketPath,
+      projectDirectory: dir,
+      onRestart: async () => {},
+    })
+    let socket: Socket | undefined
+    const pending = new Map<number, (frame: Record<string, unknown>) => void>()
+    const pushedEvents: Array<{ type: string; payload: Record<string, unknown> }> = []
+    let nextId = 0
+    const callRpc = async (method: string, params: JsonRpcPayload = {}): Promise<JsonRpcPayload> => {
+      const id = ++nextId
+      return await new Promise<JsonRpcPayload>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pending.delete(id)
+          reject(new Error(`RPC ${method} timed out`))
+        }, 5_000)
+        pending.set(id, frame => {
+          clearTimeout(timer)
+          if (frame.error) reject(new Error(JSON.stringify(frame.error)))
+          else resolve((frame.result as JsonRpcPayload) ?? {})
+        })
+        socket!.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`)
+      })
+    }
+    try {
+      await server.start()
+      socket = await new Promise<Socket>((resolve, reject) => {
+        const conn = connect(socketPath)
+        conn.once('connect', () => resolve(conn))
+        conn.once('error', reject)
+      })
+      socket.setEncoding('utf8')
+      let buf = ''
+      socket.on('data', (chunk: string) => {
+        buf += chunk
+        for (let nl = buf.indexOf('\n'); nl >= 0; nl = buf.indexOf('\n')) {
+          const line = buf.slice(0, nl).trim()
+          buf = buf.slice(nl + 1)
+          if (!line) continue
+          const frame = JSON.parse(line) as Record<string, unknown>
+          if (typeof frame.id === 'number') {
+            const waiter = pending.get(frame.id)
+            if (waiter) {
+              pending.delete(frame.id)
+              waiter(frame)
+            }
+          } else if (frame.method === 'event' && frame.params && typeof frame.params === 'object') {
+            const p = frame.params as { type?: string; payload?: Record<string, unknown> }
+            if (typeof p.type === 'string') {
+              pushedEvents.push({ type: p.type, payload: p.payload ?? {} })
+            }
+          }
+        }
+      })
+
+      // 1. Disconnected saved Antigravity session must NEVER fall through to native Xerxes,
+      //    never run native compaction, and never auto-resume after a runtime restart.
+      await callRpc('session.open', { session_key: 'agy-slot', project_dir: dir })
+      const agySession = runtime.sessionStatus('agy-slot')!
+      agySession.messages.push(
+        { role: 'user', content: 'Train looped Qwen' },
+        { role: 'assistant', content: 'Running on prism-v5p-128_dev_1.' },
+      )
+      agySession.turnCount = 1
+      agySession.metadata.acp_binding = {
+        session_id: agySession.id,
+        agent_id: 'antigravity',
+        name: 'Antigravity',
+        provider: 'antigravity',
+        transport: 'acp',
+        cwd: dir,
+        current_model: 'MODEL_4_NEON',
+        thought_level: 'xhigh',
+        connected: false,
+      }
+      await runtime.flushSessions()
+
+      // 1a. turn.submit on disconnected Antigravity session fails closed (native runner never called).
+      pushedEvents.length = 0
+      await callRpc('turn.submit', { session_key: 'agy-slot', text: 'hello after disconnect' })
+      await Bun.sleep(40)
+      expect(nativeTurnRuns).toBe(0)
+      expect(agySession.messages).toHaveLength(2)
+      expect(
+        pushedEvents.some(
+          ev =>
+            ev.type === 'notification'
+            && ev.payload.level === 'error'
+            && /Antigravity is disconnected/i.test(String(ev.payload.message ?? '')),
+        ),
+      ).toBe(true)
+
+      // 1b. session.compress refuses native compaction on saved disconnected Antigravity session.
+      const compactRes = await callRpc('session.compress', { session_key: 'agy-slot' })
+      expect(compactRes.ok).toBe(false)
+      expect(String(compactRes.error ?? '')).toMatch(/managed by Antigravity/i)
+
+      // 1c. Stale turn_resume_after_restart marker on an Antigravity session is dropped without native fallback.
+      agySession.metadata.turn_resume_after_restart = { at: Date.now(), origin: 'human' }
+      pushedEvents.length = 0
+      await callRpc('session.open', { session_key: 'agy-slot', project_dir: dir })
+      await Bun.sleep(40)
+      expect(nativeTurnRuns).toBe(0)
+      expect(agySession.metadata.turn_resume_after_restart).toBeUndefined()
+      expect(agySession.messages).toHaveLength(2)
+      expect(
+        pushedEvents.some(
+          ev => ev.type === 'notification' && /Reconnect Antigravity/i.test(String(ev.payload.message ?? '')),
+        ),
+      ).toBe(true)
+
+      // 1d. Native session pins its model + provider_profile once a turn runs,
+      //     so later global default changes cannot drift it to another model.
+      const nativeSession = await runtime.openSession('native-slot', undefined, { cwd: dir })
+      nativeSession.modelPinned = false
+      delete nativeSession.metadata.provider_profile
+      await runtime.submitTurn('native-slot', 'first native prompt', () => {})
+      expect(nativeTurnRuns).toBe(1)
+      expect(nativeSession.model).toBe('pinned-native-model')
+      expect(nativeSession.modelPinned).toBe(true)
+      expect(nativeSession.metadata.provider_profile).toBe('native-prof')
+      runtime.reload({ model: 'brand-new-global-default' })
+      expect(nativeSession.model).toBe('pinned-native-model')
+
+      // 2. Forced runtime.restart_if_idle stamps pinned { model, provider_profile } onto
+      //    interrupted native sessions, and NEVER stamps turn_resume_after_restart onto external ACP sessions.
+      agySession.activeTurnId = 'busy-agy-turn'
+      agySession.status = 'working'
+      nativeSession.activeTurnId = 'busy-native-turn'
+      nativeSession.status = 'working'
+      const restartRes = await callRpc('runtime.restart_if_idle', { force: true, requested_by: 'test' })
+      expect(restartRes.ok).toBe(true)
+      expect(agySession.metadata.turn_resume_after_restart).toBeUndefined()
+      expect(nativeSession.metadata.turn_resume_after_restart).toMatchObject({
+        model: 'pinned-native-model',
+        provider_profile: 'native-prof',
+      })
+      agySession.activeTurnId = ''
+      agySession.status = 'idle'
+      nativeSession.activeTurnId = ''
+      nativeSession.status = 'idle'
+    } finally {
+      socket?.destroy()
+      await server.stop()
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('session.rewind truncates transcript, prunes tool executions, persists rewrite, and syncs Desktop Store', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'xerxes-rewind-'))
+    const sessionsDir = join(dir, 'sessions')
+    const socketPath = join(dir, 'daemon.sock')
+    const runtime = new InMemoryDaemonRuntime(undefined, {
+      model: 'test-model',
+      currentProjectDirectory: dir,
+      sessionDirectory: sessionsDir,
+    })
+    const server = new DaemonServer({
+      runtime,
+      socketPath,
+      projectDirectory: dir,
+    })
+    let socket: Socket | undefined
+    const pending = new Map<number, (frame: Record<string, unknown>) => void>()
+    let nextId = 0
+    const callRpc = async (method: string, params: JsonRpcPayload = {}): Promise<JsonRpcPayload> => {
+      const id = ++nextId
+      return await new Promise<JsonRpcPayload>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pending.delete(id)
+          reject(new Error(`RPC ${method} timed out`))
+        }, 5_000)
+        pending.set(id, frame => {
+          clearTimeout(timer)
+          if (frame.error) reject(new Error(JSON.stringify(frame.error)))
+          else resolve((frame.result as JsonRpcPayload) ?? {})
+        })
+        socket!.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`)
+      })
+    }
+    try {
+      await server.start()
+      socket = await new Promise<Socket>((resolve, reject) => {
+        const conn = connect(socketPath)
+        conn.once('connect', () => resolve(conn))
+        conn.once('error', reject)
+      })
+      socket.setEncoding('utf8')
+      let buf = ''
+      socket.on('data', (chunk: string) => {
+        buf += chunk
+        for (let nl = buf.indexOf('\n'); nl >= 0; nl = buf.indexOf('\n')) {
+          const line = buf.slice(0, nl).trim()
+          buf = buf.slice(nl + 1)
+          if (!line) continue
+          const frame = JSON.parse(line) as Record<string, unknown>
+          if (typeof frame.id === 'number') {
+            const waiter = pending.get(frame.id)
+            if (waiter) {
+              pending.delete(frame.id)
+              waiter(frame)
+            }
+          }
+        }
+      })
+
+      await callRpc('session.open', { session_key: 'rw-slot', project_dir: dir })
+      const session = runtime.sessionStatus('rw-slot')!
+      session.messages.push(
+        { role: 'user', content: 'first prompt' },
+        {
+          role: 'assistant',
+          content: 'first reply',
+          tool_calls: [{ id: 'tc-1', type: 'function', function: { name: 'ReadFile', arguments: '{}' } }],
+        },
+        { role: 'tool', tool_call_id: 'tc-1', content: 'file content' },
+        { role: 'user', content: 'second prompt' },
+        {
+          role: 'assistant',
+          content: 'second reply',
+          tool_calls: [{ id: 'tc-2', type: 'function', function: { name: 'RunCmd', arguments: '{}' } }],
+        },
+        { role: 'tool', tool_call_id: 'tc-2', content: 'cmd output' },
+        { role: 'user', content: 'Continue after the runtime restart', origin: 'agent' },
+        { role: 'assistant', content: '[Stopped: Client claude-code: Prompt is too long]' },
+      )
+      session.toolExecutions.push(
+        { toolCallId: 'tc-1', name: 'ReadFile', inputs: {}, result: 'file content' },
+        { toolCallId: 'tc-2', name: 'RunCmd', inputs: {}, result: 'cmd output' },
+      )
+      session.thinkingContent.push('thought 1', 'thought 2', 'thought 3')
+      session.turnCount = 3
+      session.metadata.turn_resume_after_restart = { at: Date.now(), origin: 'human' }
+      await runtime.flushSessions('rewrite', session.sessionKey)
+
+      // Rewind blocked while a turn is active.
+      session.activeTurnId = 'active-1'
+      const blocked = await callRpc('session.rewind', { session_key: 'rw-slot', message_index: 6 })
+      expect(blocked.ok).toBe(false)
+      expect(String(blocked.error ?? '')).toMatch(/Cannot rewind while a turn is running/i)
+      session.activeTurnId = ''
+
+      // 1. Rewind synthetic restart turn (index 6): restores empty prompt, drops last 2 messages, clears restart marker.
+      const rwRestart = await callRpc('session.rewind', {
+        session_key: 'rw-slot',
+        message_index: 6,
+        inclusive: true,
+      })
+      expect(rwRestart.ok).toBe(true)
+      expect(rwRestart.dropped).toBe(2)
+      expect(rwRestart.restored_prompt).toBe('')
+      expect(rwRestart.turn_count).toBe(2)
+      expect(session.metadata.turn_resume_after_restart).toBeUndefined()
+      expect(session.toolExecutions).toHaveLength(2)
+
+      // 2. Rewind to 'second prompt' (index 3): returns restored_prompt and prunes tc-2 execution + extra thinking.
+      const rwSecond = await callRpc('session.rewind', {
+        session_key: 'rw-slot',
+        message_index: 3,
+        match_text: 'second prompt',
+        inclusive: true,
+      })
+      expect(rwSecond.ok).toBe(true)
+      expect(rwSecond.dropped).toBe(3)
+      expect(rwSecond.remaining_messages).toBe(3)
+      expect(rwSecond.turn_count).toBe(1)
+      expect(rwSecond.restored_prompt).toBe('second prompt')
+      expect(session.toolExecutions.map(exec => (exec as { toolCallId?: string }).toolCallId)).toEqual(['tc-1'])
+      expect(session.thinkingContent).toEqual(['thought 1'])
+
+      // Verify persisted transcript on disk matches the rewound state.
+      const reloadedRuntime = new InMemoryDaemonRuntime(undefined, {
+        currentProjectDirectory: dir,
+        sessionDirectory: sessionsDir,
+      })
+      try {
+        const reopened = await reloadedRuntime.openSession(session.id, undefined, { cwd: dir, resume: true })
+        expect(reopened.messages).toHaveLength(3)
+        expect(reopened.turnCount).toBe(1)
+        expect(reopened.modelPinned).toBe(true)
+      } finally {
+        await reloadedRuntime.shutdown()
+      }
+
+      // 3. Desktop Store.rewindToMessage clears failed state and adopts the returned rewound session.
+      const rewoundSessionWire = rwSecond.session as Record<string, unknown>
+      const handlers = new Set<(event: DaemonEvent) => void>()
+      const storeBridge = {
+        call: async (method: string) => {
+          if (method === 'initialize') {
+            return {
+              ok: true,
+              session_id: 's-rw',
+              cwd: dir,
+              model: 'test-model',
+              connection_lease_supported: true,
+              session: { id: 's-rw', key: 'k-rw', cwd: dir, status: 'idle', messages: [], history: { actions: [], before: null, has_more: false } },
+            }
+          }
+          if (method === 'session.rewind') {
+            return {
+              ok: true,
+              dropped: 3,
+              restored_prompt: 'second prompt',
+              session: rewoundSessionWire,
+            }
+          }
+          return { ok: true }
+        },
+        subscribe: (handler: (event: DaemonEvent) => void) => {
+          handlers.add(handler)
+          return () => handlers.delete(handler)
+        },
+        push: (type: string, payload: Record<string, unknown> = {}) => {
+          for (const handler of handlers) handler({ type, payload })
+        },
+      }
+      const prevWindow = (globalThis as { window?: unknown }).window
+      ;(globalThis as { window?: unknown }).window = {
+        xerxes: { onEvent: (handler: (event: DaemonEvent) => void) => storeBridge.subscribe(handler) },
+      }
+      try {
+        const desktopStore = new Store()
+        desktopStore.start(storeBridge as never)
+        await Bun.sleep(20)
+        storeBridge.push('turn_begin', { session_id: 's-rw', text: 'second prompt' })
+        storeBridge.push('turn_end', { session_id: 's-rw', stop_reason: 'turn_failed', failed: true, error: 'Prompt is too long' })
+        expect(desktopStore.getSnapshot().failed).not.toBeNull()
+        const res = await desktopStore.rewindToMessage({ messageIndex: 3, text: 'second prompt' })
+        expect(res.ok).toBe(true)
+        expect(res.restoredPrompt).toBe('second prompt')
+        expect(desktopStore.getSnapshot().failed).toBeNull()
+        expect(desktopStore.getSnapshot().blocks.filter(b => b.kind === 'user').map(b => b.text)).toEqual(['first prompt'])
+      } finally {
+        ;(globalThis as { window?: unknown }).window = prevWindow
+      }
+    } finally {
+      socket?.destroy()
+      await server.stop()
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('first-class Codex ACP discovery, CodexExecJsonRunner streaming, and DaemonAcpBridgeHost controls', async () => {
+    // 1. Discovery priority: XERXES_CODEX_ACP_CMD > codex-acp > codex (codex-exec-json) > installHint.
+    const withOverride = discoverExternalAcpAgents({
+      env: { XERXES_CODEX_ACP_CMD: '/opt/bin/codex-acp --stdio' },
+      binaryExists: p => p === '/opt/bin/codex-acp',
+      readConfigText: () => undefined,
+    })
+    expect(withOverride.find(a => a.id === 'codex')).toMatchObject({
+      provider: 'codex',
+      transport: 'acp',
+      available: true,
+      binaryPath: '/opt/bin/codex-acp',
+      args: ['--stdio'],
+    })
+
+    const withCodexAcpBin = discoverExternalAcpAgents({
+      env: { HOME: '/Users/dev', PATH: '/usr/local/bin' },
+      homeDir: '/Users/dev',
+      binaryExists: p => p === '/usr/local/bin/codex-acp',
+      readConfigText: () => undefined,
+    })
+    expect(withCodexAcpBin.find(a => a.id === 'codex')).toMatchObject({
+      provider: 'codex',
+      transport: 'acp',
+      available: true,
+      binaryPath: '/usr/local/bin/codex-acp',
+    })
+
+    const withCodexCli = discoverExternalAcpAgents({
+      env: { HOME: '/Users/dev', PATH: '/usr/local/bin' },
+      homeDir: '/Users/dev',
+      binaryExists: p => p === '/usr/local/bin/codex',
+      readConfigText: () => undefined,
+    })
+    expect(withCodexCli.find(a => a.id === 'codex')).toMatchObject({
+      provider: 'codex',
+      transport: 'codex-exec-json',
+      available: true,
+      binaryPath: '/usr/local/bin/codex',
+    })
+
+    // 2. CodexExecJsonRunner translates NDJSON items + passes resume/model/effort/mode flags.
+    const spawnedCalls: Array<{ bin: string; args: readonly string[] }> = []
+    const makeStream = (lines: readonly string[]): ReadableStream<Uint8Array> =>
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(`${lines.join('\n')}\n`))
+          controller.close()
+        },
+      })
+    const runner = new CodexExecJsonRunner({
+      binaryPath: '/usr/local/bin/codex',
+      cwd: '/repo',
+      model: 'gpt-5.4',
+      thoughtLevel: 'xhigh',
+      mode: 'turbo',
+      spawn: (bin, args) => {
+        spawnedCalls.push({ bin, args: [...args] })
+        return {
+          pid: 999,
+          stdout: makeStream([
+            JSON.stringify({ type: 'thread.started', thread_id: 'codex-thread-42' }),
+            JSON.stringify({ type: 'item.updated', item: { id: 'r1', type: 'reasoning', text: 'Checking files' } }),
+            JSON.stringify({ type: 'item.started', item: { id: 'cmd1', type: 'command_execution', command: 'ls -la', status: 'in_progress' } }),
+            JSON.stringify({ type: 'item.completed', item: { id: 'cmd1', type: 'command_execution', command: 'ls -la', aggregated_output: 'README.md', exit_code: 0, status: 'completed' } }),
+            JSON.stringify({ type: 'item.updated', item: { id: 'm1', type: 'agent_message', text: 'Hello ' } }),
+            JSON.stringify({ type: 'item.completed', item: { id: 'm1', type: 'agent_message', text: 'Hello world!' } }),
+            JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 120, cached_input_tokens: 40, output_tokens: 18 } }),
+          ]),
+          stderr: makeStream([]),
+          exited: Promise.resolve(0),
+          kill: () => {},
+        }
+      },
+    })
+    const events: AcpBridgeStreamEvent[] = []
+    const turn1 = await runner.prompt({ text: 'inspect repo', onEvent: ev => events.push(ev) })
+    expect(turn1.externalSessionId).toBe('codex-thread-42')
+    expect(events.filter(e => e.type === 'text_delta').map(e => (e.type === 'text_delta' ? e.text : '')).join('')).toBe('Hello world!')
+    expect(events.some(e => e.type === 'thought_delta' && e.text === 'Checking files')).toBe(true)
+    expect(events.some(e => e.type === 'tool_call' && e.name === 'Bash')).toBe(true)
+    expect(events.some(e => e.type === 'tool_result' && e.output === 'README.md')).toBe(true)
+    expect(events.some(e => e.type === 'usage' && e.inputTokens === 120 && e.outputTokens === 18)).toBe(true)
+    expect(spawnedCalls[0]?.args).toContain('--model')
+    expect(spawnedCalls[0]?.args).toContain('gpt-5.4')
+    expect(spawnedCalls[0]?.args).toContain('model_reasoning_effort="xhigh"')
+    expect(spawnedCalls[0]?.args).toContain('--dangerously-bypass-approvals-and-sandbox')
+
+    await runner.prompt({ text: 'follow up', onEvent: () => {} })
+    expect(spawnedCalls[1]?.args.slice(0, 2)).toEqual(['exec', 'resume'])
+    expect(spawnedCalls[1]?.args).toContain('codex-thread-42')
+
+    // 3. DaemonAcpBridgeHost connects codex-exec-json and mutates model, mode, and thought_level.
+    const host = new DaemonAcpBridgeHost({
+      discoverAgents: () => [
+        { id: 'xerxes', name: 'Xerxes', provider: 'xerxes', transport: 'native', available: true, description: 'Native' },
+        { id: 'codex', name: 'Codex', provider: 'codex', transport: 'codex-exec-json', available: true, binaryPath: '/usr/local/bin/codex', command: '/usr/local/bin/codex', description: 'Codex' },
+      ],
+      createCodexRunner: () => runner,
+    })
+    const connRes = await host.connect({ sessionId: 's-codex', agentId: 'codex', cwd: '/repo' })
+    expect(connRes.ok).toBe(true)
+    if (connRes.ok) {
+      expect(connRes.binding.provider).toBe('codex')
+      expect(connRes.binding.transport).toBe('codex-exec-json')
+      expect(connRes.binding.thought_levels?.length).toBeGreaterThan(0)
+    }
+    const modelRes = await host.setModel('s-codex', 'gpt-5.3-codex')
+    expect(modelRes.ok && modelRes.binding.current_model).toBe('gpt-5.3-codex')
+    const effortRes = await host.setConfigOption('s-codex', 'thought_level', 'medium')
+    expect(effortRes.ok && effortRes.binding.thought_level).toBe('medium')
+    const modeRes = await host.setMode('s-codex', 'manual')
+    expect(modeRes.ok && modeRes.binding.current_mode).toBe('manual')
+    await host.disposeAll()
+  })
+
+  test('cross-runtime chat importer reads Antigravity, Claude Code, and Codex transcripts read-only and serves daemon RPCs', async () => {
+    const fakeHome = await mkdtemp(join(tmpdir(), 'xerxes-import-home-'))
+    const repoDir = join(fakeHome, 'work', 'easydel-src')
+    const sessionsDir = join(fakeHome, 'xerxes-sessions')
+    const socketPath = join(fakeHome, 'daemon.sock')
+    await mkdir(repoDir, { recursive: true })
+
+    // 1. Seed Antigravity brain directory (strictly read-only source).
+    const agyId = '11111111-2222-3333-4444-555555555555'
+    const agyBrain = join(fakeHome, '.gemini', 'antigravity-cli', 'brain', agyId)
+    await mkdir(join(agyBrain, '.system_generated', 'logs'), { recursive: true })
+    await writeFile(join(agyBrain, 'task.md'), '# Transforming Qwen Into Loop Transformer\n\n- [x] Run 1k single-pass\n')
+    await writeFile(
+      join(agyBrain, '.system_generated', 'logs', 'transcript_full.jsonl'),
+      [
+        JSON.stringify({
+          step_index: 0,
+          source: 'USER_EXPLICIT',
+          type: 'USER_INPUT',
+          status: 'DONE',
+          content: `<USER_REQUEST>\nTrain looped Qwen3.8 on 1k single pass\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nCommand Working Directory: ${repoDir}\n</ADDITIONAL_METADATA>`,
+        }),
+        JSON.stringify({
+          step_index: 1,
+          source: 'MODEL',
+          type: 'PLANNER_RESPONSE',
+          status: 'DONE',
+          model: 'gemini-4-neon-high',
+          thinking: 'Checking dataset shards',
+          tool_calls: [{ name: 'run_command', args: { CommandLine: 'ls data/' } }],
+        }),
+        JSON.stringify({
+          step_index: 2,
+          source: 'MODEL',
+          type: 'GENERIC',
+          status: 'DONE',
+          content: 'Command exited with code 0.\nshard_001.parquet',
+        }),
+        JSON.stringify({
+          step_index: 3,
+          source: 'MODEL',
+          type: 'PLANNER_RESPONSE',
+          status: 'DONE',
+          model: 'gemini-4-neon-high',
+          content: 'Verified all shards and launched single-pass 1k step run.',
+        }),
+      ].join('\n') + '\n',
+    )
+
+    // 2. Seed Claude Code project JSONL.
+    const claudeId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+    const claudeProj = join(fakeHome, '.claude', 'projects', '-tmp-easydel-src')
+    await mkdir(claudeProj, { recursive: true })
+    await writeFile(
+      join(claudeProj, `${claudeId}.jsonl`),
+      [
+        JSON.stringify({ type: 'custom-title', customTitle: 'Claude TPU Fix', sessionId: claudeId }),
+        JSON.stringify({ type: 'user', cwd: repoDir, sessionId: claudeId, message: { role: 'user', content: 'Audit TPU scripts' } }),
+        JSON.stringify({ type: 'assistant', cwd: repoDir, sessionId: claudeId, message: { id: 'msg_1', role: 'assistant', model: 'claude-opus-4-6', content: [{ type: 'thinking', thinking: 'Scanning scripts' }] } }),
+        JSON.stringify({ type: 'assistant', cwd: repoDir, sessionId: claudeId, message: { id: 'msg_1', role: 'assistant', model: 'claude-opus-4-6', content: [{ type: 'tool_use', id: 'tu_1', name: 'Read', input: { file_path: 'train.py' } }] } }),
+        JSON.stringify({ type: 'user', cwd: repoDir, sessionId: claudeId, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu_1', content: 'def main(): pass' }] } }),
+        JSON.stringify({ type: 'assistant', cwd: repoDir, sessionId: claudeId, message: { id: 'msg_2', role: 'assistant', model: 'claude-opus-4-6', content: [{ type: 'text', text: 'Audit complete.' }] } }),
+      ].join('\n') + '\n',
+    )
+
+    // 3. Seed Codex rollout JSONL.
+    const codexId = '99999999-8888-7777-6666-555555555555'
+    const codexDayDir = join(fakeHome, '.codex', 'sessions', '2026', '11', '26')
+    await mkdir(codexDayDir, { recursive: true })
+    await writeFile(
+      join(codexDayDir, `rollout-2026-11-26T10-00-00-${codexId}.jsonl`),
+      [
+        JSON.stringify({ type: 'session_meta', payload: { session_id: codexId, cwd: repoDir } }),
+        JSON.stringify({ type: 'turn_context', payload: { model: 'gpt-5.4', effort: 'xhigh', cwd: repoDir } }),
+        JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '# AGENTS.md instructions for /repo\nignored boilerplate' }] } }),
+        JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Optimize JAX kernel' }] } }),
+        JSON.stringify({ type: 'response_item', payload: { type: 'reasoning', summary: [{ text: 'Analyzing Pallas tiling' }] } }),
+        JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Tuned block sizes to 128x128.' }] } }),
+      ].join('\n') + '\n',
+    )
+
+    // Verify direct read-only discovery + transcript parsers across all 3 runtimes.
+    expect(cleanAgyUserPromptText('<USER_REQUEST>\nHello\n</USER_REQUEST>\n<ADDITIONAL_METADATA>x</ADDITIONAL_METADATA>')).toBe('Hello')
+    const listed = discoverImportableExternalSessions({ homeDir: fakeHome, cwd: repoDir, allProjects: true })
+    expect(listed.map(item => `${item.runtime_id}:${item.id}`).sort()).toEqual([
+      `antigravity:${agyId}`,
+      `claude-code:${claudeId}`,
+      `codex:${codexId}`,
+    ])
+
+    const agyLoaded = loadExternalSessionTranscript({ homeDir: fakeHome, runtimeId: 'antigravity', externalSessionId: agyId })
+    expect(agyLoaded?.title).toBe('Transforming Qwen Into Loop Transformer')
+    expect(agyLoaded?.model).toBe('gemini-4-neon-high')
+    expect(agyLoaded?.thoughtLevel).toBe('high')
+    expect(agyLoaded?.turnCount).toBe(1)
+    expect(agyLoaded?.messages.map(m => m.role)).toEqual(['user', 'assistant', 'tool', 'assistant'])
+    expect(agyLoaded?.toolExecutions).toHaveLength(1)
+
+    const claudeLoaded = loadExternalSessionTranscript({ homeDir: fakeHome, runtimeId: 'claude-code', externalSessionId: claudeId })
+    expect(claudeLoaded?.title).toBe('Claude TPU Fix')
+    expect(claudeLoaded?.model).toBe('claude-opus-4-6')
+    expect(claudeLoaded?.messages.map(m => m.role)).toEqual(['user', 'assistant', 'tool', 'assistant'])
+    expect(claudeLoaded?.toolExecutions).toHaveLength(1)
+
+    const codexLoaded = loadExternalSessionTranscript({ homeDir: fakeHome, runtimeId: 'codex', externalSessionId: codexId })
+    expect(codexLoaded?.title).toBe('Optimize JAX kernel')
+    expect(codexLoaded?.model).toBe('gpt-5.4')
+    expect(codexLoaded?.thoughtLevel).toBe('xhigh')
+    expect(codexLoaded?.messages.map(m => m.role)).toEqual(['user', 'assistant'])
+    expect(codexLoaded?.messages[0]?.content).toBe('Optimize JAX kernel')
+
+    // Verify end-to-end daemon RPC (`acp.importable_sessions` + `acp.import_session`) with fake HOME.
+    const prevHome = process.env.HOME
+    process.env.HOME = fakeHome
+    const runtime = new InMemoryDaemonRuntime(undefined, {
+      model: 'native-default',
+      currentProjectDirectory: repoDir,
+      sessionDirectory: sessionsDir,
+    })
+    const server = new DaemonServer({ runtime, socketPath, projectDirectory: repoDir })
+    let socket: Socket | undefined
+    const pending = new Map<number, (frame: Record<string, unknown>) => void>()
+    let nextId = 0
+    const callRpc = async (method: string, params: JsonRpcPayload = {}): Promise<JsonRpcPayload> => {
+      const id = ++nextId
+      return await new Promise<JsonRpcPayload>((resolve, reject) => {
+        const timer = setTimeout(() => { pending.delete(id); reject(new Error(`RPC ${method} timed out`)) }, 5_000)
+        pending.set(id, frame => {
+          clearTimeout(timer)
+          if (frame.error) reject(new Error(JSON.stringify(frame.error)))
+          else resolve((frame.result as JsonRpcPayload) ?? {})
+        })
+        socket!.write(`${JSON.stringify({ jsonrpc: '2.0', id, method, params })}\n`)
+      })
+    }
+    try {
+      await server.start()
+      socket = await new Promise<Socket>((resolve, reject) => {
+        const conn = connect(socketPath)
+        conn.once('connect', () => resolve(conn))
+        conn.once('error', reject)
+      })
+      socket.setEncoding('utf8')
+      let buf = ''
+      socket.on('data', (chunk: string) => {
+        buf += chunk
+        for (let nl = buf.indexOf('\n'); nl >= 0; nl = buf.indexOf('\n')) {
+          const line = buf.slice(0, nl).trim()
+          buf = buf.slice(nl + 1)
+          if (!line) continue
+          const frame = JSON.parse(line) as Record<string, unknown>
+          if (typeof frame.id === 'number') {
+            const waiter = pending.get(frame.id)
+            if (waiter) { pending.delete(frame.id); waiter(frame) }
+          }
+        }
+      })
+
+      const importableBefore = await callRpc('acp.importable_sessions', { cwd: repoDir, all_projects: true })
+      expect(importableBefore.ok).toBe(true)
+      expect((importableBefore.sessions as Array<{ id: string }>).length).toBe(3)
+
+      const imported = await callRpc('acp.import_session', {
+        runtime_id: 'antigravity',
+        external_session_id: agyId,
+        cwd: repoDir,
+        connect: false,
+      })
+      expect(imported.ok).toBe(true)
+      expect(imported.title).toBe('Transforming Qwen Into Loop Transformer')
+      expect(imported.imported_messages).toBe(4)
+      expect(imported.imported_turns).toBe(1)
+
+      // Subsequent listing marks the imported chat as `already_imported: true`.
+      const importableAfter = await callRpc('acp.importable_sessions', { cwd: repoDir, all_projects: true })
+      const agyRow = (importableAfter.sessions as Array<{ id: string; already_imported?: boolean }>).find(s => s.id === agyId)
+      expect(agyRow?.already_imported).toBe(true)
+    } finally {
+      process.env.HOME = prevHome
+      socket?.destroy()
+      await server.stop()
+      await rm(fakeHome, { recursive: true, force: true })
     }
   })
 })

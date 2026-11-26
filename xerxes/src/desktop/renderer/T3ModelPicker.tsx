@@ -44,6 +44,7 @@ import {
 import { RuntimeBrandIcon } from './BrandMark.js'
 import { PickerLayer, bareModelName, DELEGATION_CHOICES } from './Overlays.js'
 import { T3Icon } from './T3Icons.js'
+import { openImportChatModal } from './ImportChatModal.js'
 import type { AgentBrandProvider } from './XerxesSprites.js'
 import { store, type AcpExternalAgentInfo, type Snapshot } from './store.js'
 import type { PermissionMode } from './types.js'
@@ -51,6 +52,7 @@ import type { PermissionMode } from './types.js'
 export { RuntimeBrandIcon }
 
 const FAVORITES_KEY = 'xerxes.desktop.favoriteModels.v1'
+export const FAVORITE_EFFORTS_KEY = 'xerxes.desktop.favoriteThinkingEfforts.v1'
 
 const PERMISSION_OPTIONS: ReadonlyArray<{
   readonly id: PermissionMode
@@ -82,6 +84,63 @@ function saveFavoriteModels(ids: readonly string[]): void {
   } catch {
     // Ignore storage quota / sandbox issues.
   }
+}
+
+/** Composite storage key for a starred thinking effort scoped to a runtime and model. */
+export function favoriteEffortKey(runtimeId: string, modelId: string, effortId: string): string {
+  return `${runtimeId.trim()}:${modelId.trim()}:${effortId.trim()}`
+}
+
+export function loadFavoriteThinkingEfforts(): string[] {
+  try {
+    if (typeof localStorage === 'undefined') return []
+    const raw = localStorage.getItem(FAVORITE_EFFORTS_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+export function saveFavoriteThinkingEfforts(keys: readonly string[]): void {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(FAVORITE_EFFORTS_KEY, JSON.stringify(keys.slice(0, 64)))
+    }
+  } catch {
+    // Ignore storage quota / sandbox issues.
+  }
+}
+
+export function toggleFavoriteThinkingEffort(
+  current: readonly string[],
+  runtimeId: string,
+  modelId: string,
+  effortId: string,
+): string[] {
+  const key = favoriteEffortKey(runtimeId, modelId, effortId)
+  return current.includes(key)
+    ? current.filter(item => item !== key)
+    : [key, ...current]
+}
+
+/** Return the most recently starred thinking effort for a runtime+model (filtered to available levels when known). */
+export function preferredFavoriteEffort(
+  favorites: readonly string[],
+  runtimeId: string,
+  modelId: string,
+  availableIds: readonly string[] = [],
+): string | undefined {
+  const prefix = `${runtimeId.trim()}:${modelId.trim()}:`
+  const allowed = availableIds.length > 0 ? new Set(availableIds) : null
+  for (const key of favorites) {
+    if (!key.startsWith(prefix)) continue
+    const effortId = key.slice(prefix.length)
+    if (!effortId) continue
+    if (!allowed || allowed.has(effortId)) return effortId
+  }
+  return undefined
 }
 
 /** Shortens "Gemini 4 Neon" -> "4 Neon", "Claude Sonnet 4.6" -> "Sonnet 4.6" for the compact trigger & thinking header. */
@@ -147,6 +206,7 @@ export function T3ModelPicker({
   const [cursor, setCursor] = useState(0)
   const [selectedRail, setSelectedRail] = useState<string>('active')
   const [favorites, setFavorites] = useState<readonly string[]>(loadFavoriteModels)
+  const [favoriteEfforts, setFavoriteEfforts] = useState<readonly string[]>(loadFavoriteThinkingEfforts)
   const [permissionsExpanded, setPermissionsExpanded] = useState(false)
   const [openExtraConfigId, setOpenExtraConfigId] = useState<string | null>(defaultOpenExtraConfigId)
   const [customOpen, setCustomOpen] = useState(false)
@@ -382,10 +442,24 @@ export function T3ModelPicker({
         if (!ok) return
       }
       store.pickModel(entry.id)
+      const favEffort = preferredFavoriteEffort(
+        favoriteEfforts,
+        'xerxes',
+        entry.id,
+        store.getSnapshot().reasoningLevels.map(row => row.effort),
+      ) ?? preferredFavoriteEffort(favoriteEfforts, 'xerxes', entry.id)
+      if (favEffort) store.pickReasoning(favEffort)
       return
     }
     if (externalBinding && entry.runtimeId === externalBinding.agent_id) {
-      await store.setAcpModel(entry.id)
+      const ok = await store.setAcpModel(entry.id)
+      if (!ok) return
+      const liveBinding = store.getSnapshot().acpBinding
+      const available = (liveBinding?.thought_levels ?? []).map(opt => opt.id)
+      const favEffort = preferredFavoriteEffort(favoriteEfforts, entry.runtimeId, entry.id, available)
+      if (favEffort && liveBinding?.thought_level !== favEffort) {
+        await store.setAcpThoughtLevel(favEffort)
+      }
     }
   }
 
@@ -421,6 +495,19 @@ export function T3ModelPicker({
         ? current.filter(item => item !== entryKey)
         : [entryKey, ...current]
       saveFavoriteModels(next)
+      return next
+    })
+  }
+
+  const activeEffortModelId = displayExternal
+    ? (displayExternal.current_model?.trim() || activeAcpModelLabel(displayExternal))
+    : snap.model
+
+  const toggleFavoriteEffort = (effortId: string): void => {
+    if (!activeEffortModelId) return
+    setFavoriteEfforts(current => {
+      const next = toggleFavoriteThinkingEffort(current, activeRuntimeId, activeEffortModelId, effortId)
+      saveFavoriteThinkingEfforts(next)
       return next
     })
   }
@@ -771,6 +858,7 @@ export function T3ModelPicker({
                         ) : (
                           visibleModels.map((entry, idx) => {
                             const starred = favorites.includes(entry.key)
+                            const favEffort = preferredFavoriteEffort(favoriteEfforts, entry.runtimeId, entry.id)
                             const focused = idx === activeCursor
                             return (
                               <div key={entry.key} className="t3-mpop__row-wrap" role="none">
@@ -783,12 +871,17 @@ export function T3ModelPicker({
                                   data-focused={focused ? 'true' : undefined}
                                   disabled={snap.turnActive || connecting}
                                   className={`t3-mpop__row${entry.active ? ' is-active' : ''}${focused ? ' is-focused' : ''}`}
-                                  title={entry.id}
+                                  title={favEffort ? `${entry.id} · Favorite effort: ${reasoningLevelLabel(favEffort)}` : entry.id}
                                   onMouseEnter={() => setCursor(idx)}
                                   onClick={() => void pickModelEntry(entry)}
                                 >
                                   <RuntimeBrandIcon provider={entry.provider} size={14} className="t3-mpop__row-ico" />
                                   <span className="t3-mpop__row-name">{entry.name}</span>
+                                  {effectiveRail === 'favorites' && favEffort && (
+                                    <span className="t3-mpop__row-effort" title="Favorite thinking effort">
+                                      {reasoningLevelLabel(favEffort)}
+                                    </span>
+                                  )}
                                   {entry.active && <T3Icon name="check" size={13} className="t3-mpop__row-check" />}
                                   {idx < 8 && <kbd className="t3-mpop__kbd">⌘{idx + 1}</kbd>}
                                 </button>
@@ -820,24 +913,42 @@ export function T3ModelPicker({
 
                       <div className="t3-mpop__effort-list" role="radiogroup" aria-label="Thinking level">
                         {thinkingLevels.length > 0 ? (
-                          thinkingLevels.map(level => (
-                            <button
-                              key={level.id}
-                              type="button"
-                              role="radio"
-                              aria-checked={level.active}
-                              disabled={snap.turnActive}
-                              className={`t3-mpop__effort-row${level.active ? ' is-active' : ''}`}
-                              title={level.description}
-                              onClick={() => {
-                                if (externalBinding) void store.setAcpThoughtLevel(level.id)
-                                else store.pickReasoning(level.id)
-                              }}
-                            >
-                              <span>{level.label}</span>
-                              {level.active && <T3Icon name="check" size={13} />}
-                            </button>
-                          ))
+                          thinkingLevels.map(level => {
+                            const effortStarred = activeEffortModelId
+                              ? favoriteEfforts.includes(favoriteEffortKey(activeRuntimeId, activeEffortModelId, level.id))
+                              : false
+                            return (
+                              <div key={level.id} className="t3-mpop__effort-wrap" role="none">
+                                <button
+                                  type="button"
+                                  role="radio"
+                                  aria-checked={level.active}
+                                  disabled={snap.turnActive}
+                                  className={`t3-mpop__effort-row${level.active ? ' is-active' : ''}`}
+                                  title={level.description}
+                                  onClick={() => {
+                                    if (externalBinding) void store.setAcpThoughtLevel(level.id)
+                                    else store.pickReasoning(level.id)
+                                  }}
+                                >
+                                  <span>{level.label}</span>
+                                  {level.active && <T3Icon name="check" size={13} />}
+                                </button>
+                                <button
+                                  type="button"
+                                  className={`t3-mpop__effort-star${effortStarred ? ' is-starred' : ''}`}
+                                  title={effortStarred ? 'Remove from favorite thinking efforts' : 'Pin as favorite thinking effort'}
+                                  aria-label={effortStarred ? `Unfavorite ${level.label} thinking effort` : `Favorite ${level.label} thinking effort`}
+                                  onClick={event => {
+                                    event.stopPropagation()
+                                    toggleFavoriteEffort(level.id)
+                                  }}
+                                >
+                                  <T3Icon name="star" size={11} />
+                                </button>
+                              </div>
+                            )
+                          })
                         ) : (
                           <div className="t3-mpop__effort-empty">
                             {snap.reasoningLoading ? 'Loading levels…' : snap.reasoningNote || 'Default reasoning'}
@@ -1005,7 +1116,7 @@ export function T3ModelPicker({
                   </div>
                 )}
 
-                {/* Bottom Footer Bar: Centered Permissions / Access Mode Trigger (Image 4) */}
+                {/* Bottom Footer Bar: Permissions / Access Mode + Import Chat Trigger */}
                 <div className="t3-mpop__foot">
                   {externalBinding && acpModes.length === 0 ? (
                     <span className="t3-mpop__foot-btn" aria-label={`Runtime: ${footerLabel}`}>
@@ -1024,6 +1135,26 @@ export function T3ModelPicker({
                       <T3Icon name={permissionsExpanded ? 'chevronDown' : 'chevronUp'} size={12} />
                     </button>
                   )}
+                  <button
+                    type="button"
+                    className="t3-mpop__foot-btn"
+                    title="Import existing chat history from Antigravity, Claude Code, Codex, or ACP"
+                    aria-label="Import chat from runtime"
+                    disabled={!online}
+                    onClick={() => {
+                      const targetRuntime =
+                        effectiveRail !== 'favorites' && effectiveRail !== 'xerxes'
+                          ? effectiveRail
+                          : activeRuntimeId !== 'xerxes'
+                            ? activeRuntimeId
+                            : 'all'
+                      close()
+                      openImportChatModal(targetRuntime)
+                    }}
+                  >
+                    <T3Icon name="download" size={13} />
+                    <span>Import chat</span>
+                  </button>
                 </div>
               </div>
             </div>

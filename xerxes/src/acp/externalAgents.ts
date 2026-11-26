@@ -24,7 +24,7 @@ import { isAcpRecord } from './types.js'
 export type { AcpAvailableCommand, AcpContentBlock, AcpUsageCost } from './client.js'
 
 export type AcpExternalAgentProvider = 'xerxes' | 'claude-code' | 'antigravity' | 'codex' | 'acp'
-export type AcpExternalAgentTransport = 'native' | 'acp' | 'claude-stream-json'
+export type AcpExternalAgentTransport = 'native' | 'acp' | 'claude-stream-json' | 'codex-exec-json'
 
 export interface AcpExternalAgentInfo {
   readonly id: string
@@ -160,6 +160,47 @@ export const DEFAULT_CLAUDE_CODE_MODELS: readonly AcpExternalModelOption[] = Obj
     name: 'Haiku',
     description: 'Claude Code CLI alias for the latest Haiku model',
   },
+])
+
+export const DEFAULT_CODEX_MODELS: readonly AcpExternalModelOption[] = Object.freeze([
+  {
+    id: 'gpt-5.4',
+    name: 'GPT-5.4',
+    description: 'Latest frontier OpenAI Codex model',
+  },
+  {
+    id: 'gpt-5.3-codex',
+    name: 'GPT-5.3 Codex',
+    description: 'Coding-specialized OpenAI Codex model',
+  },
+  {
+    id: 'gpt-5.2-codex',
+    name: 'GPT-5.2 Codex',
+    description: 'Reliable multi-step engineering Codex model',
+  },
+  {
+    id: 'gpt-5.4-mini',
+    name: 'GPT-5.4 Mini',
+    description: 'Fast, lightweight OpenAI Codex model',
+  },
+  {
+    id: 'o3',
+    name: 'o3',
+    description: 'OpenAI reasoning model',
+  },
+])
+
+export const DEFAULT_CODEX_THOUGHT_LEVELS: readonly AcpExternalModeOption[] = Object.freeze([
+  { id: 'low', name: 'Low', description: 'Fast responses with minimal reasoning' },
+  { id: 'medium', name: 'Medium', description: 'Balanced reasoning depth and speed' },
+  { id: 'high', name: 'High', description: 'Deep reasoning for complex engineering' },
+  { id: 'xhigh', name: 'Extra high', description: 'Maximum reasoning effort' },
+])
+
+export const DEFAULT_CODEX_MODES: readonly AcpExternalModeOption[] = Object.freeze([
+  { id: 'auto', name: 'Auto', description: 'Workspace-write sandbox with automatic execution' },
+  { id: 'manual', name: 'Read only', description: 'Read-only sandbox without workspace edits' },
+  { id: 'turbo', name: 'Full access', description: 'Bypass approvals and sandbox restrictions' },
 ])
 
 export const ACP_TURBO_MODE_ID = 'turbo'
@@ -374,6 +415,8 @@ const VALID_PROVIDERS: ReadonlySet<string> = new Set([
 const CLAUDE_INSTALL_HINT = 'Install Claude Code (claude) or @zed-industries/claude-agent-acp'
 const ANTIGRAVITY_INSTALL_HINT =
   'Install Antigravity CLI (agy) so `agy acp` is on PATH, or set XERXES_ANTIGRAVITY_ACP_CMD'
+const CODEX_INSTALL_HINT =
+  'Install @agentclientprotocol/codex-acp (`codex-acp`) or @openai/codex (`codex`), or set XERXES_CODEX_ACP_CMD'
 
 /** Split a shell-like command override (`agy acp --flag`) into command + args. */
 export function splitCommandString(commandLine: string): readonly string[] {
@@ -577,6 +620,7 @@ export function discoverExternalAcpAgents(
     },
     discoverClaudeCodeAgent(env, claudeExtraDirs, resolveBin),
     discoverAntigravityAgent(env, antigravityExtraDirs, resolveBin),
+    discoverCodexAgent(env, claudeExtraDirs, resolveBin),
   ]
 
   const configPath = options.configPath ?? join(resolveXerxesHome(env, home), 'acp-agents.json')
@@ -764,6 +808,77 @@ function discoverAntigravityAgent(
     available: false,
     installHint: ANTIGRAVITY_INSTALL_HINT,
     description: 'Google Antigravity ACP agent',
+  }
+}
+
+function discoverCodexAgent(
+  env: Readonly<Record<string, string | undefined>>,
+  extraDirs: readonly string[],
+  resolveBin: (name: string, extraDirs: readonly string[]) => string | undefined,
+): AcpExternalAgentInfo {
+  const overrideRaw = env.XERXES_CODEX_ACP_CMD?.trim()
+  if (overrideRaw) {
+    const tokens = splitCommandString(overrideRaw)
+    const cmd = tokens[0] ?? ''
+    const args = tokens.slice(1)
+    const binaryPath = cmd ? resolveBin(cmd, extraDirs) : undefined
+    return {
+      id: 'codex',
+      name: 'Codex',
+      provider: 'codex',
+      transport: 'acp',
+      available: Boolean(binaryPath),
+      ...(binaryPath ? { command: binaryPath, binaryPath } : cmd ? { command: cmd } : {}),
+      args,
+      ...(binaryPath
+        ? {}
+        : {
+            installHint: `XERXES_CODEX_ACP_CMD binary "${cmd || overrideRaw}" was not found. ${CODEX_INSTALL_HINT}`,
+          }),
+      description: 'OpenAI Codex via configured ACP command (XERXES_CODEX_ACP_CMD)',
+    }
+  }
+
+  for (const acpBin of ['codex-acp', 'codex-agent-acp']) {
+    const found = resolveBin(acpBin, extraDirs)
+    if (found) {
+      return {
+        id: 'codex',
+        name: 'Codex',
+        provider: 'codex',
+        transport: 'acp',
+        available: true,
+        command: found,
+        args: [],
+        binaryPath: found,
+        description: `OpenAI Codex via native ACP stdio bridge (${acpBin})`,
+      }
+    }
+  }
+
+  const codexBin = resolveBin('codex', extraDirs)
+  if (codexBin) {
+    return {
+      id: 'codex',
+      name: 'Codex',
+      provider: 'codex',
+      transport: 'codex-exec-json',
+      available: true,
+      command: codexBin,
+      args: ['exec', '--json'],
+      binaryPath: codexBin,
+      description: 'OpenAI Codex CLI via `codex exec --json` streaming runner',
+    }
+  }
+
+  return {
+    id: 'codex',
+    name: 'Codex',
+    provider: 'codex',
+    transport: 'acp',
+    available: false,
+    installHint: CODEX_INSTALL_HINT,
+    description: 'OpenAI Codex via ACP or `codex exec --json`',
   }
 }
 
@@ -1693,6 +1808,578 @@ function flattenClaudeToolResultContent(content: unknown): string {
     return ''
   }
   return safeJsonStringify(content)
+}
+
+/** Read default model and reasoning effort from `$CODEX_HOME/config.toml` (strictly read-only). */
+export function readCodexConfigDefaults(options: {
+  readonly env?: Readonly<Record<string, string | undefined>>
+  readonly homeDir?: string
+  readonly readText?: (path: string) => string | undefined
+} = {}): { readonly model?: string; readonly thoughtLevel?: string } {
+  const env = options.env ?? process.env
+  const home = options.homeDir ?? (env.HOME?.trim() || homedir())
+  const codexHome = env.CODEX_HOME?.trim()
+    ? resolve(env.CODEX_HOME.trim())
+    : join(home, '.codex')
+  const raw = readOptionalText(join(codexHome, 'config.toml'), options.readText)
+  if (!raw) return {}
+  let model: string | undefined
+  let thoughtLevel: string | undefined
+  let inSection = false
+  for (const line of raw.split('\n')) {
+    const trimmed = line.trim()
+    if (!trimmed || trimmed.startsWith('#')) continue
+    if (trimmed.startsWith('[')) {
+      inSection = true
+      continue
+    }
+    if (inSection) continue
+    const mModel = /^model\s*=\s*["']([^"']+)["']/.exec(trimmed)
+    if (mModel && mModel[1]) {
+      model = mModel[1].trim()
+      continue
+    }
+    const mEffort = /^model_reasoning_effort\s*=\s*["']([^"']+)["']/.exec(trimmed)
+    if (mEffort && mEffort[1]) {
+      thoughtLevel = mEffort[1].trim()
+    }
+  }
+  return {
+    ...(model ? { model } : {}),
+    ...(thoughtLevel ? { thoughtLevel } : {}),
+  }
+}
+
+export interface CodexExecJsonRunnerOptions {
+  readonly binaryPath: string
+  readonly cwd: string
+  readonly env?: Readonly<Record<string, string | undefined>>
+  readonly mode?: string
+  readonly model?: string
+  readonly permissionMode?: string
+  readonly resumeSessionId?: string
+  readonly spawn?: ClaudeStreamJsonSpawner
+  readonly thoughtLevel?: string
+}
+
+export interface CodexExecJsonPromptParams {
+  readonly onEvent: (event: AcpBridgeStreamEvent) => void
+  readonly permissionMode?: string
+  readonly signal?: AbortSignal
+  readonly text: string
+}
+
+export interface CodexExecJsonPromptResult {
+  readonly cancelled: boolean
+  readonly externalSessionId?: string
+  readonly stopReason: string
+}
+
+interface CodexStreamParseState {
+  emittedAnyText: boolean
+  hadErrorEvent: boolean
+  lastErrorMessage: string | undefined
+  readonly emittedTextByItemId: Map<string, string>
+  readonly emittedThoughtByItemId: Map<string, string>
+  readonly seenToolCallIds: Set<string>
+  readonly settledToolCallIds: Set<string>
+}
+
+/**
+ * Streaming runner for official OpenAI Codex CLI (`codex exec --json` and
+ * `codex exec resume <id> --json`). Translates Codex NDJSON events into the
+ * canonical {@link AcpBridgeStreamEvent} union shared with {@link AcpStdioClient}.
+ */
+export class CodexExecJsonRunner {
+  private readonly binaryPath: string
+  private readonly cwd: string
+  private readonly env: Readonly<Record<string, string | undefined>> | undefined
+  private readonly defaultPermissionMode: string | undefined
+  private readonly spawner: ClaudeStreamJsonSpawner
+  private externalSessionId: string | undefined
+  private selectedModel: string | undefined
+  private selectedThoughtLevel: string | undefined
+  private selectedMode: string
+  private activeProcess: ClaudeStreamJsonProcess | undefined
+  private activeReader: ReturnType<ReadableStream<Uint8Array>['getReader']> | undefined
+  private activeCancelled = false
+
+  constructor(options: CodexExecJsonRunnerOptions) {
+    this.binaryPath = options.binaryPath
+    this.cwd = options.cwd
+    this.env = options.env
+    this.defaultPermissionMode = options.permissionMode
+    this.externalSessionId = options.resumeSessionId?.trim() || undefined
+    this.selectedModel = options.model?.trim() || undefined
+    this.selectedThoughtLevel = options.thoughtLevel?.trim() || undefined
+    this.selectedMode = normalizeCodexMode(options.mode ?? options.permissionMode)
+    this.spawner = options.spawn ?? spawnBunClaudeStreamProcess
+  }
+
+  get sessionId(): string | undefined {
+    return this.externalSessionId
+  }
+
+  get pid(): number | undefined {
+    return this.activeProcess?.pid
+  }
+
+  getModel(): string | undefined {
+    return this.selectedModel
+  }
+
+  setModel(modelId?: string): void {
+    const trimmed = modelId?.trim()
+    this.selectedModel = trimmed ? trimmed : undefined
+  }
+
+  getThoughtLevel(): string | undefined {
+    return this.selectedThoughtLevel
+  }
+
+  setThoughtLevel(level?: string): void {
+    const trimmed = level?.trim()
+    this.selectedThoughtLevel = trimmed ? trimmed : undefined
+  }
+
+  getMode(): string {
+    return this.selectedMode
+  }
+
+  setMode(modeId?: string): void {
+    this.selectedMode = normalizeCodexMode(modeId)
+  }
+
+  cancel(): boolean {
+    if (!this.activeProcess) {
+      return false
+    }
+    this.activeCancelled = true
+    try {
+      this.activeProcess.kill()
+    } catch {
+      // Ignore kill errors on already-exited subprocesses.
+    }
+    if (this.activeReader) {
+      void this.activeReader.cancel().catch(() => undefined)
+    }
+    return true
+  }
+
+  async dispose(): Promise<void> {
+    this.cancel()
+    const active = this.activeProcess
+    if (active) {
+      await active.exited.catch(() => null)
+    }
+  }
+
+  async prompt(params: CodexExecJsonPromptParams): Promise<CodexExecJsonPromptResult> {
+    if (params.signal?.aborted) {
+      return {
+        cancelled: true,
+        ...(this.externalSessionId ? { externalSessionId: this.externalSessionId } : {}),
+        stopReason: 'cancelled',
+      }
+    }
+
+    const mode = this.selectedMode || normalizeCodexMode(params.permissionMode ?? this.defaultPermissionMode)
+    const args: string[] = ['exec']
+    const resuming = Boolean(this.externalSessionId)
+    if (resuming) {
+      args.push('resume')
+    }
+    args.push('--json', '--skip-git-repo-check')
+    if (!resuming) {
+      args.push('-C', this.cwd)
+    }
+    if (this.selectedModel) {
+      args.push('--model', this.selectedModel)
+    }
+    if (this.selectedThoughtLevel) {
+      args.push('-c', `model_reasoning_effort="${this.selectedThoughtLevel.replace(/"/g, '')}"`)
+    }
+    if (mode === 'turbo') {
+      args.push('--dangerously-bypass-approvals-and-sandbox')
+    } else if (mode === 'manual') {
+      if (resuming) {
+        args.push('-c', 'sandbox_mode="read-only"', '-c', 'approval_policy="never"')
+      } else {
+        args.push('--sandbox', 'read-only', '-c', 'approval_policy="never"')
+      }
+    } else {
+      args.push('-c', 'sandbox_mode="workspace-write"', '-c', 'approval_policy="never"')
+    }
+    if (resuming && this.externalSessionId) {
+      args.push(this.externalSessionId)
+    }
+    args.push('-')
+
+    this.activeCancelled = false
+    const proc = this.spawner(this.binaryPath, args, {
+      cwd: this.cwd,
+      ...(this.env ? { env: this.env } : {}),
+      input: params.text,
+    })
+    this.activeProcess = proc
+
+    const reader = proc.stdout.getReader()
+    this.activeReader = reader
+    const onAbort = () => {
+      this.activeCancelled = true
+      try {
+        proc.kill()
+      } catch {
+        // Ignore kill error during abort.
+      }
+      void reader.cancel().catch(() => undefined)
+    }
+    params.signal?.addEventListener('abort', onAbort, { once: true })
+
+    const stderrChunks: string[] = []
+    const stderrTask = proc.stderr ? collectStreamText(proc.stderr, stderrChunks) : Promise.resolve()
+
+    const state: CodexStreamParseState = {
+      emittedAnyText: false,
+      hadErrorEvent: false,
+      lastErrorMessage: undefined,
+      emittedTextByItemId: new Map<string, string>(),
+      emittedThoughtByItemId: new Map<string, string>(),
+      seenToolCallIds: new Set<string>(),
+      settledToolCallIds: new Set<string>(),
+    }
+
+    const decoder = new TextDecoder()
+    let buffer = ''
+    try {
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        let newline = buffer.indexOf('\n')
+        while (newline >= 0) {
+          const line = buffer.slice(0, newline).trim()
+          buffer = buffer.slice(newline + 1)
+          if (line) {
+            this.handleNdjsonLine(line, state, params.onEvent)
+          }
+          newline = buffer.indexOf('\n')
+        }
+      }
+      buffer += decoder.decode()
+      const tail = buffer.trim()
+      if (tail) {
+        this.handleNdjsonLine(tail, state, params.onEvent)
+      }
+    } catch (error) {
+      if (!this.activeCancelled && !params.signal?.aborted) {
+        throw error
+      }
+    } finally {
+      if (this.activeReader === reader) {
+        this.activeReader = undefined
+      }
+      try {
+        reader.releaseLock()
+      } catch {
+        // Already closed.
+      }
+      await stderrTask.catch(() => undefined)
+      params.signal?.removeEventListener('abort', onAbort)
+    }
+
+    const exitCode = await proc.exited.catch(() => null)
+    if (this.activeProcess === proc) {
+      this.activeProcess = undefined
+    }
+
+    const cancelled = this.activeCancelled || params.signal?.aborted === true
+    if (cancelled) {
+      return {
+        cancelled: true,
+        ...(this.externalSessionId ? { externalSessionId: this.externalSessionId } : {}),
+        stopReason: 'cancelled',
+      }
+    }
+
+    if (exitCode !== 0 && exitCode !== null) {
+      const stderrText = stderrChunks.join('').trim()
+      const detail = state.lastErrorMessage || stderrText || `codex exited with code ${exitCode}`
+      if (!state.hadErrorEvent) {
+        params.onEvent({ type: 'error', message: detail })
+      }
+      throw new Error(`Codex CLI failed (exit ${exitCode}): ${detail}`)
+    }
+
+    return {
+      cancelled: false,
+      ...(this.externalSessionId ? { externalSessionId: this.externalSessionId } : {}),
+      stopReason: state.hadErrorEvent ? 'error' : 'end_turn',
+    }
+  }
+
+  private handleNdjsonLine(
+    line: string,
+    state: CodexStreamParseState,
+    emit: (event: AcpBridgeStreamEvent) => void,
+  ): void {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(line) as unknown
+    } catch {
+      return
+    }
+    if (!isAcpRecord(parsed)) return
+
+    const type = typeof parsed.type === 'string' ? parsed.type : ''
+    if (type === 'thread.started') {
+      const threadId = typeof parsed.thread_id === 'string' ? parsed.thread_id.trim() : ''
+      if (threadId) {
+        this.externalSessionId = threadId
+        emit({
+          type: 'session_init',
+          externalSessionId: threadId,
+          ...(this.selectedModel ? { model: this.selectedModel } : {}),
+        })
+      }
+      return
+    }
+
+    if (type === 'item.started' || type === 'item.updated' || type === 'item.completed') {
+      const item = isAcpRecord(parsed.item) ? parsed.item : undefined
+      if (!item) return
+      const itemType = typeof item.type === 'string' ? item.type : ''
+      const itemId = typeof item.id === 'string' && item.id.trim() ? item.id.trim() : `${itemType || 'item'}-${state.seenToolCallIds.size}`
+      const isCompleted = type === 'item.completed'
+
+      if (itemType === 'agent_message') {
+        const fullText = typeof item.text === 'string' ? item.text : ''
+        const prev = state.emittedTextByItemId.get(itemId) ?? ''
+        const delta = fullText.startsWith(prev) ? fullText.slice(prev.length) : fullText
+        if (delta) {
+          state.emittedTextByItemId.set(itemId, fullText)
+          state.emittedAnyText = true
+          emit({ type: 'text_delta', text: delta })
+        }
+        return
+      }
+
+      if (itemType === 'reasoning') {
+        const fullThought = typeof item.text === 'string'
+          ? item.text
+          : Array.isArray(item.summary)
+            ? item.summary.map(s => (typeof s === 'string' ? s : isAcpRecord(s) && typeof s.text === 'string' ? s.text : '')).filter(Boolean).join('\n')
+            : ''
+        const prev = state.emittedThoughtByItemId.get(itemId) ?? ''
+        const delta = fullThought.startsWith(prev) ? fullThought.slice(prev.length) : fullThought
+        if (delta) {
+          state.emittedThoughtByItemId.set(itemId, fullThought)
+          emit({ type: 'thought_delta', text: delta })
+        }
+        return
+      }
+
+      if (itemType === 'command_execution') {
+        const command = typeof item.command === 'string' ? item.command : ''
+        const output = typeof item.aggregated_output === 'string' ? item.aggregated_output : ''
+        const exitCode = typeof item.exit_code === 'number' ? item.exit_code : undefined
+        const status = typeof item.status === 'string' ? item.status : ''
+        if (!state.seenToolCallIds.has(itemId)) {
+          state.seenToolCallIds.add(itemId)
+          emit({
+            type: 'tool_call',
+            toolCallId: itemId,
+            name: 'Bash',
+            title: command || 'Run command',
+            kind: 'execute',
+            argumentsText: safeJsonStringify({ command }),
+            rawInput: { command },
+          })
+        } else if (!isCompleted && output) {
+          emit({
+            type: 'tool_update',
+            toolCallId: itemId,
+            name: 'Bash',
+            title: command || 'Run command',
+            kind: 'execute',
+            output,
+          })
+        }
+        if ((isCompleted || status === 'completed' || status === 'failed') && !state.settledToolCallIds.has(itemId)) {
+          state.settledToolCallIds.add(itemId)
+          const isError = status === 'failed' || (exitCode !== undefined && exitCode !== 0)
+          emit({
+            type: 'tool_result',
+            toolCallId: itemId,
+            name: 'Bash',
+            title: command || 'Run command',
+            kind: 'execute',
+            output: output || (exitCode !== undefined ? `exit code ${exitCode}` : 'Done'),
+            ...(isError ? { isError: true } : {}),
+          })
+        }
+        return
+      }
+
+      if (itemType === 'file_change') {
+        const changes = Array.isArray(item.changes) ? item.changes.filter(isAcpRecord) : []
+        const paths = changes.map(c => (typeof c.path === 'string' ? c.path : '')).filter(Boolean)
+        const locations = paths.map(path => ({ path }))
+        const title = paths.length > 0 ? paths.join(', ') : 'File change'
+        if (!state.seenToolCallIds.has(itemId)) {
+          state.seenToolCallIds.add(itemId)
+          emit({
+            type: 'tool_call',
+            toolCallId: itemId,
+            name: 'FileEdit',
+            title,
+            kind: 'edit',
+            argumentsText: safeJsonStringify({ changes }),
+            rawInput: { changes },
+            ...(locations.length > 0 ? { locations } : {}),
+          })
+        }
+        if (isCompleted && !state.settledToolCallIds.has(itemId)) {
+          state.settledToolCallIds.add(itemId)
+          const status = typeof item.status === 'string' ? item.status : ''
+          emit({
+            type: 'tool_result',
+            toolCallId: itemId,
+            name: 'FileEdit',
+            title,
+            kind: 'edit',
+            output: changes.map(c => `${String(c.kind ?? 'update')} ${String(c.path ?? '')}`).join('\n') || 'Applied',
+            ...(locations.length > 0 ? { locations } : {}),
+            ...(status === 'failed' ? { isError: true } : {}),
+          })
+        }
+        return
+      }
+
+      if (itemType === 'mcp_tool_call') {
+        const serverName = typeof item.server === 'string' ? item.server : 'mcp'
+        const toolName = typeof item.tool === 'string' ? item.tool : 'tool'
+        const fullName = `${serverName}.${toolName}`
+        if (!state.seenToolCallIds.has(itemId)) {
+          state.seenToolCallIds.add(itemId)
+          emit({
+            type: 'tool_call',
+            toolCallId: itemId,
+            name: fullName,
+            title: fullName,
+            argumentsText: item.arguments === undefined ? '' : safeJsonStringify(item.arguments),
+            ...(item.arguments !== undefined ? { rawInput: item.arguments } : {}),
+          })
+        }
+        if (isCompleted && !state.settledToolCallIds.has(itemId)) {
+          state.settledToolCallIds.add(itemId)
+          const errObj = isAcpRecord(item.error) ? item.error : undefined
+          const errMsg = typeof errObj?.message === 'string' ? errObj.message : typeof item.error === 'string' ? item.error : ''
+          const output = errMsg || (item.result === undefined ? '' : safeJsonStringify(item.result))
+          emit({
+            type: 'tool_result',
+            toolCallId: itemId,
+            name: fullName,
+            title: fullName,
+            output,
+            ...(errMsg ? { isError: true } : {}),
+          })
+        }
+        return
+      }
+
+      if (itemType === 'web_search') {
+        const query = typeof item.query === 'string' ? item.query : ''
+        if (!state.seenToolCallIds.has(itemId)) {
+          state.seenToolCallIds.add(itemId)
+          emit({
+            type: 'tool_call',
+            toolCallId: itemId,
+            name: 'WebSearch',
+            title: query || 'Web search',
+            kind: 'search',
+            argumentsText: safeJsonStringify({ query }),
+            rawInput: { query },
+          })
+        }
+        if (isCompleted && !state.settledToolCallIds.has(itemId)) {
+          state.settledToolCallIds.add(itemId)
+          emit({
+            type: 'tool_result',
+            toolCallId: itemId,
+            name: 'WebSearch',
+            title: query || 'Web search',
+            kind: 'search',
+            output: query ? `Searched: ${query}` : 'Completed web search',
+          })
+        }
+        return
+      }
+
+      if (itemType === 'todo_list' && Array.isArray(item.items)) {
+        const entries: AcpPlanEntry[] = []
+        for (const rawEntry of item.items) {
+          if (!isAcpRecord(rawEntry)) continue
+          const content = typeof rawEntry.text === 'string' ? rawEntry.text.trim() : ''
+          if (!content) continue
+          entries.push({
+            content,
+            status: rawEntry.completed === true ? 'completed' : 'pending',
+          })
+        }
+        emit({ type: 'plan', entries })
+        return
+      }
+
+      if (itemType === 'error') {
+        const msg = typeof item.message === 'string' ? item.message.trim() : 'Codex item failed.'
+        state.hadErrorEvent = true
+        state.lastErrorMessage = msg
+        emit({ type: 'error', message: msg })
+      }
+      return
+    }
+
+    if (type === 'turn.completed') {
+      const usage = isAcpRecord(parsed.usage) ? parsed.usage : undefined
+      if (usage) {
+        const inputTokens = typeof usage.input_tokens === 'number' ? usage.input_tokens : undefined
+        const cachedReadTokens = typeof usage.cached_input_tokens === 'number' ? usage.cached_input_tokens : undefined
+        const outputTokens = typeof usage.output_tokens === 'number' ? usage.output_tokens : undefined
+        if (inputTokens !== undefined || cachedReadTokens !== undefined || outputTokens !== undefined) {
+          emit({
+            type: 'usage',
+            ...(inputTokens !== undefined ? { inputTokens } : {}),
+            ...(cachedReadTokens !== undefined ? { cachedReadTokens } : {}),
+            ...(outputTokens !== undefined ? { outputTokens } : {}),
+          })
+        }
+      }
+      return
+    }
+
+    if (type === 'turn.failed' || type === 'error') {
+      const errRec = isAcpRecord(parsed.error) ? parsed.error : undefined
+      const msg =
+        (typeof errRec?.message === 'string' && errRec.message.trim()) ||
+        (typeof parsed.message === 'string' && parsed.message.trim()) ||
+        'Codex reported an error.'
+      state.hadErrorEvent = true
+      state.lastErrorMessage = msg
+      emit({ type: 'error', message: msg })
+    }
+  }
+}
+
+function normalizeCodexMode(mode: string | undefined): 'auto' | 'manual' | 'turbo' {
+  const clean = (mode ?? '').trim().toLowerCase()
+  if (clean === 'turbo' || clean === 'accept-all' || clean === 'bypass' || clean === 'bypasspermissions') {
+    return 'turbo'
+  }
+  if (clean === 'manual' || clean === 'plan' || clean === 'read-only' || clean === 'readonly') {
+    return 'manual'
+  }
+  return 'auto'
 }
 
 function safeJsonStringify(value: unknown): string {

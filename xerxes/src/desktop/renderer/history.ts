@@ -25,16 +25,23 @@ const MSG_ACTION_RE = /^(\d+):message$/
 const TOOL_ACTION_RE = /^(\d+):tool(?::|$)/
 
 export function historyBlocks(page: HistoryPage, ids = new Map<string, number>()): Block[] {
-  const perAction = page.actions.map(action => ({
-    actionId: action.id,
-    blocks: blocksFromStoredMessages(action.messages, { executions: action.executions, thinking: action.thinking }).map((block, index) => {
-      const key = `${action.id}:${index}`
-      // Negative IDs are reserved for history; live and committed runs use positive IDs.
-      const id = ids.get(key) ?? -(ids.size + 1)
-      ids.set(key, id)
-      return { ...block, id }
-    }),
-  }))
+  const perAction = page.actions.map(action => {
+    const msgMatch = MSG_ACTION_RE.exec(action.id)
+    const actionMessageIndex = msgMatch ? Number(msgMatch[1]) : undefined
+    return {
+      actionId: action.id,
+      blocks: blocksFromStoredMessages(action.messages, { executions: action.executions, thinking: action.thinking }).map((block, index) => {
+        const key = `${action.id}:${index}`
+        // Negative IDs are reserved for history; live and committed runs use positive IDs.
+        const id = ids.get(key) ?? -(ids.size + 1)
+        ids.set(key, id)
+        if (block.kind === 'user' && actionMessageIndex !== undefined) {
+          return { ...block, id, messageIndex: actionMessageIndex }
+        }
+        return { ...block, id }
+      }),
+    }
+  })
 
   // Older remote daemons may emit `<idx>:message` (thinking + final reply) followed
   // by `<idx>:tool:*` for a flat assistant turn. When no subsequent assistant reply

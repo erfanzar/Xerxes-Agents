@@ -231,6 +231,7 @@ export interface SavedDaemonSession {
   readonly model?: string;
   readonly acpProvider?: string;
   readonly acpAgentId?: string;
+  readonly acpExternalSessionId?: string;
   readonly parentSessionId?: string;
   readonly path: string;
   /** False while a native child in this daemon still owns the transcript. */
@@ -1530,9 +1531,20 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
 
   private applyDefaultSettings(session: DaemonSession): void {
     const model = this.model();
-    // Only sessions that never chose for themselves follow the global
-    // default; a pinned one keeps what it was given.
-    if (!session.modelPinned) {
+    // Only untouched sessions (or sessions with no model configured yet) that
+    // are not bound to an external ACP runtime follow the global default.
+    const hasPinnedWork =
+      Boolean(session.model) && (
+        session.messages.length > 0
+        || session.turnCount > 0
+        || Boolean(stringValue(session.metadata.provider_profile))
+      );
+    const hasExternalAcp =
+      isRecord(session.metadata.acp_binding)
+      && stringValue(session.metadata.acp_binding.transport) !== "native"
+      && Boolean(stringValue(session.metadata.acp_binding.agent_id))
+      && stringValue(session.metadata.acp_binding.agent_id) !== "xerxes";
+    if (!session.modelPinned && !hasPinnedWork && !hasExternalAcp) {
       const modelDelta = contextDeltaFor(session.model, model, Date.now(), "model");
       if (modelDelta) appendContextDelta(session.metadata, modelDelta);
       session.model = model;
@@ -1986,6 +1998,20 @@ export class InMemoryDaemonRuntime implements DaemonRuntime {
     session.cancelRequested = false;
     session.activeTurnId = newSessionId();
     session.lastActive = Date.now();
+    // Once a task starts working with a model, pin it (and its resolved
+    // provider profile) to the session so global default changes or restarts
+    // can never silently switch models or providers mid-conversation.
+    if (session.model) {
+      session.modelPinned = true;
+    }
+    if (
+      !session.metadata.provider_profile
+      && typeof this.runtimeSettings.provider_profile === "string"
+      && this.runtimeSettings.provider_profile.trim()
+      && session.model === this.model()
+    ) {
+      session.metadata.provider_profile = this.runtimeSettings.provider_profile.trim();
+    }
     this.touchSession(sessionKey);
     const turnRunner = this.turnRunner;
     const runnerManagesState = turnRunner.managesSessionState === true;
@@ -2535,7 +2561,11 @@ function sessionFromTranscript(
     // default: resuming a transcript should continue the conversation on the
     // model that produced it, not silently move it to another provider.
     model: stringValue(transcript.metadata.model) || model,
-    modelPinned: Boolean(stringValue(transcript.metadata.model)),
+    modelPinned: Boolean(
+      stringValue(transcript.metadata.model)
+      || stringValue(transcript.metadata.provider_profile)
+      || transcript.messages.length > 0,
+    ),
     ...(stringValue(transcript.metadata.reasoning_effort)
       ? {
           reasoningEffort: stringValue(transcript.metadata.reasoning_effort),
@@ -2637,6 +2667,10 @@ function savedSessionSummary(
     && rawAcpAgentId.toLowerCase() !== "xerxes";
   const acpProvider = isExternalAcp ? (rawAcpProvider || rawAcpAgentId) : undefined;
   const acpAgentId = isExternalAcp && rawAcpAgentId ? rawAcpAgentId : undefined;
+  const acpExternalSessionId =
+    isExternalAcp && rawAcp && typeof rawAcp.external_session_id === "string" && rawAcp.external_session_id.trim()
+      ? rawAcp.external_session_id.trim()
+      : undefined;
   const persistedStatus = nonemptyMetadataString(metadata, "status");
   const activeChild = kind === "subagent" && isSubagentConversationActive(transcript.sessionId);
   const status = persistedStatus === "running" && !activeChild ? "interrupted" : persistedStatus;
@@ -2653,6 +2687,7 @@ function savedSessionSummary(
     ...(model ? { model } : {}),
     ...(acpProvider ? { acpProvider } : {}),
     ...(acpAgentId ? { acpAgentId } : {}),
+    ...(acpExternalSessionId ? { acpExternalSessionId } : {}),
     ...(parentSessionId ? { parentSessionId } : {}),
     ...(resolvedRootSessionId
       ? { rootSessionId: resolvedRootSessionId }

@@ -1395,11 +1395,13 @@ function compactListingMetadata(metadata: Readonly<Record<string, unknown>>): Re
     const agentId = typeof binding.agent_id === 'string' ? binding.agent_id.trim() : ''
     const provider = typeof binding.provider === 'string' ? binding.provider.trim() : ''
     const transport = typeof binding.transport === 'string' ? binding.transport.trim() : ''
+    const externalSessionId = typeof binding.external_session_id === 'string' ? binding.external_session_id.trim() : ''
     if (agentId || provider) {
       compact.acp_binding = {
         ...(agentId ? { agent_id: agentId } : {}),
         ...(provider ? { provider } : {}),
         ...(transport ? { transport } : {}),
+        ...(externalSessionId ? { external_session_id: externalSessionId } : {}),
       }
     }
   }

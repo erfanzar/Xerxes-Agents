@@ -1043,7 +1043,7 @@ export interface BtwEventPayload {
 // ── External ACP Agents (v35) ─────────────────────────────────────────
 
 export type AcpExternalAgentProvider = 'xerxes' | 'claude-code' | 'antigravity' | 'codex' | 'acp'
-export type AcpExternalAgentTransport = 'native' | 'acp' | 'claude-stream-json'
+export type AcpExternalAgentTransport = 'native' | 'acp' | 'claude-stream-json' | 'codex-exec-json'
 
 export interface AcpExternalAgentInfo {
   readonly id: string

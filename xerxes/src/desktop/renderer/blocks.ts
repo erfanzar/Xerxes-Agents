@@ -1067,7 +1067,7 @@ export class BlockBuilder {
   }
 
   /** A user line lands at the fold's end (submit ordering, replays). */
-  pushUser(text: string, contextSummary = false, images: readonly string[] = []): number {
+  pushUser(text: string, contextSummary = false, images: readonly string[] = [], messageIndex?: number): number {
     // Internal Immortals/Swarm coordinator wakes must render as quiet notices,
     // never as right-aligned human chat bubbles.
     if (!contextSummary && images.length === 0 && isInternalSwarmWakeText(text)) {
@@ -1075,7 +1075,17 @@ export class BlockBuilder {
     }
     this.commitRuns(false)
     const id = this.nextId()
-    this.blocks = [...this.blocks, { kind: 'user', id, text, ...(contextSummary ? { contextSummary: true } : {}), ...(images.length ? { images } : {}) }]
+    this.blocks = [
+      ...this.blocks,
+      {
+        kind: 'user',
+        id,
+        text,
+        ...(contextSummary ? { contextSummary: true } : {}),
+        ...(images.length ? { images } : {}),
+        ...(messageIndex !== undefined ? { messageIndex } : {}),
+      },
+    ]
     this.invalidateSnapshot()
     return id
   }
@@ -1456,7 +1466,7 @@ export function blocksFromStoredMessages(messages: unknown, hydration: StoredHyd
       }
       // The harness wrote it (goal round, monitor, reminder): not shown.
       if (role === 'user' && (harnessOriginOf(record.origin) || isLegacyHarnessPrompt(content))) { emitCalls(); continue }
-      if (role === 'user') builder.pushUser(content, record.xerxes_compaction_summary === true)
+      if (role === 'user') builder.pushUser(content, record.xerxes_compaction_summary === true, [], msgIndex)
       else if (role === 'assistant') {
         const hasToolCalls = Array.isArray(record.tool_calls) && record.tool_calls.length > 0
         if (hasToolCalls && !hasLaterAssistantTextInTurn(msgIndex)) {
@@ -1521,7 +1531,7 @@ export function blocksFromStoredMessages(messages: unknown, hydration: StoredHyd
       if (record.origin === 'agent' || isInternalSwarmWakeText(joined)) {
         if (joined.trim()) builder.pushNotice(formatInternalWakeNotice(joined))
       } else if (!harnessOriginOf(record.origin)) {
-        builder.pushUser(joined, record.xerxes_compaction_summary === true, userImages)
+        builder.pushUser(joined, record.xerxes_compaction_summary === true, userImages, msgIndex)
       }
     }
     emitCalls()

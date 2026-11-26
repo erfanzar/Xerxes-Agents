@@ -19,6 +19,7 @@ import { ageOf, store, type Snapshot } from './store.js'
 import { PickerLayer } from './Overlays.js'
 import { ProjectMonogram } from './ProjectMonogram.js'
 import { T3Icon } from './T3Icons.js'
+import { ImportChatModal, OPEN_IMPORT_CHAT_EVENT } from './ImportChatModal.js'
 import { copyToClipboard } from './CopyButton.js'
 import { LearnedBadge } from './LearnedPanel.js'
 import { ElapsedClock } from './ElapsedClock.js'
@@ -265,6 +266,8 @@ export function T3Sidebar({
   const needle = filter.trim().toLowerCase()
   const [scopeOpen, setScopeOpen] = useState(false)
   const [addProjectOpen, setAddProjectOpen] = useState(false)
+  const [importOpen, setImportOpen] = useState(false)
+  const [importRuntime, setImportRuntime] = useState<string>('all')
   const [snoozeMenuId, setSnoozeMenuId] = useState<string | null>(null)
   type FolderMenuState =
     | { readonly kind: 'local'; readonly key: string; readonly cwd: string; readonly label: string; readonly contextId?: number; readonly x: number; readonly y: number }
@@ -289,6 +292,19 @@ export function T3Sidebar({
   const activeProvider: AgentBrandProvider = activeExternalBinding
     ? activeExternalBinding.provider
     : 'xerxes'
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const onOpenImport = (event: Event): void => {
+      const detail = (event as CustomEvent<{ runtime?: string }>).detail
+      setScopeOpen(false)
+      setAddProjectOpen(false)
+      setImportRuntime(detail?.runtime || 'all')
+      setImportOpen(true)
+    }
+    window.addEventListener(OPEN_IMPORT_CHAT_EVENT, onOpenImport)
+    return () => window.removeEventListener(OPEN_IMPORT_CHAT_EVENT, onOpenImport)
+  }, [])
 
   useLayoutEffect(() => {
     if (!scopeOpen || typeof window === 'undefined') return
@@ -1160,6 +1176,22 @@ export function T3Sidebar({
 
         <button
           type="button"
+          className={`t3-icon-btn t3-side__toolbtn${importOpen ? ' is-active' : ''}`}
+          disabled={!online}
+          title="Import chat from Antigravity, Claude Code, Codex, or ACP…"
+          aria-label="Import chat from runtime"
+          onClick={() => {
+            setScopeOpen(false)
+            setAddProjectOpen(false)
+            setImportRuntime('all')
+            setImportOpen(true)
+          }}
+        >
+          <T3Icon name="download" size={14} />
+        </button>
+
+        <button
+          type="button"
           className="t3-icon-btn t3-side__toolbtn t3-side__new"
           disabled={!online}
           title={snap.cwd ? `New thread in ${workspaceName(snap.cwd)} (⌘N)` : 'New thread (⌘N)'}
@@ -1172,6 +1204,14 @@ export function T3Sidebar({
           <T3Icon name="squarePen" size={14} />
         </button>
       </div>
+
+      <ImportChatModal
+        open={importOpen}
+        initialRuntime={importRuntime}
+        {...(snap.cwd ? { currentCwd: snap.cwd } : {})}
+        onClose={() => setImportOpen(false)}
+        onImported={() => onOpen(null)}
+      />
 
       {/* Main Scrollable Thread Area */}
       <nav className="side__list t3-side__list" aria-label="Threads">
