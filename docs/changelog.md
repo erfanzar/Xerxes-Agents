@@ -7,6 +7,10 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.67 — 2026-11-27
+
+- **Fix near-invisible Immortals `SwarmGraph` edges on dark themes.** Raises Mentions edge stroke mix (`52%` → `82%`), broadcast stroke mix (`48%` → `68%`), arrowhead fills (`70%` → `92%` / `65%` → `78%`), dense ambient opacity (`.14` → `.62`), dimmed edge opacity (`.09` → `.26`), and dense/base/highlighted stroke widths & marker sizes (`atelier.css`, `SwarmGraph.tsx`), and boosts Map view connector visibility (`1.4px`/`.68` → `1.6px`/`.84`, using `--x-secondary` for awaiting-handoff connectors).
+
 ## 0.8.66 — 2026-11-26
 
 - **Fix interactive HTML artifacts under Chromium CSP3 & eliminate full-document CSS/layout distortion.** Rewrites static inline HTML event handlers (`onclick`, `oninput`, `onchange`, `onsubmit`, etc.) and `javascript:` links (excluding `<script>`, `<style>`, `<textarea>`, `<title>`, and `<template>`) into externalized `data:text/javascript;base64,...` registrations; installs isolated in-memory `localStorage`/`sessionStorage` polyfills and a batched `MutationObserver` upgrader for dynamically injected `innerHTML` and cloned `<template>` handlers inside sandboxed `blob:` iframes (`WidgetFrame.tsx`); wraps injected widget tokens in `@layer xerxes-defaults` so author CSS always takes precedence and preserves native root `16px` (`rem`), `height: auto`, and `position: sticky` on full `<!doctype html>` documents; prevents iframe focus clicks from marking the host window unfocused/paused (`pageVisibility.ts`); decodes HTML entities (`&amp;`, `&mdash;`, etc.) in artifact titles across both renderer (`WidgetFrame.tsx`, `RailSections.tsx`, `ArtifactCard.tsx`) and `agyBrainBridge.ts`; strips redundant nested borders/headers inside inline `ArtifactCard` embeds and collapses the inline copy when opening in the right panel; and adds an opt-in `Run interactive` / `Static preview` toggle in `FilePreview.tsx` while keeping `sandbox=""` safe-by-default.

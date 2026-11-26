@@ -4227,15 +4227,15 @@ details.swarm-ov-card[open]>.swarm-ov-card__head .swarm-ov-caret{transform:rotat
 
 /* Mentions SVG primitives */
 .swarm-graph__edge{transition:opacity 140ms ease}
-.swarm-graph__edge path{stroke:color-mix(in srgb,var(--x-secondary) 52%,transparent);transition:stroke 140ms ease,stroke-width 140ms ease}
-.swarm-graph__edge[data-kind='broadcast'] path{stroke:color-mix(in srgb,var(--x-meta) 48%,transparent)}
-.swarm-graph__edge[data-dense='true']{opacity:.14}
+.swarm-graph__edge path{stroke:color-mix(in srgb,var(--x-secondary) 82%,transparent);stroke-linecap:round;transition:stroke 140ms ease,stroke-width 140ms ease}
+.swarm-graph__edge[data-kind='broadcast'] path{stroke:color-mix(in srgb,var(--x-secondary) 68%,transparent)}
+.swarm-graph__edge[data-dense='true']{opacity:.62}
 .swarm-graph__edge[data-active='true']{opacity:1}
 .swarm-graph__edge[data-active='true'] path{stroke:var(--x-activity)}
-.swarm-graph__edge[data-dimmed='true']{opacity:.09}
-.swarm-graph__marker--mention{fill:color-mix(in srgb,var(--x-secondary) 70%,transparent)}
+.swarm-graph__edge[data-dimmed='true']{opacity:.26}
+.swarm-graph__marker--mention{fill:color-mix(in srgb,var(--x-secondary) 92%,transparent)}
 .swarm-graph__marker--active{fill:var(--x-activity)}
-.swarm-graph__marker--broadcast{fill:color-mix(in srgb,var(--x-meta) 65%,transparent)}
+.swarm-graph__marker--broadcast{fill:color-mix(in srgb,var(--x-secondary) 78%,transparent)}
 .swarm-graph__edge-label rect{fill:var(--x-backdrop,var(--x-screen));stroke:var(--x-hairline);stroke-width:.75}
 .swarm-graph__edge-label text{fill:var(--x-secondary);font:600 9.5px/1 var(--mono);font-variant-numeric:tabular-nums}
 .swarm-graph__edge[data-active='true'] .swarm-graph__edge-label text{fill:var(--x-title)}
@@ -4297,13 +4297,13 @@ details.swarm-ov-card[open]>.swarm-ov-card__head .swarm-ov-caret{transform:rotat
 .swarm-battlefield__member-dot[data-state='error']{fill:var(--x-failed)}
 .swarm-battlefield__overflow-text{fill:var(--x-meta);font:500 10.5px/1 var(--sans);font-variant-numeric:tabular-nums}
 
-.swarm-battlefield__vector-path{stroke-width:1.4;opacity:.68;stroke-linecap:round}
+.swarm-battlefield__vector-path{stroke-width:1.6;opacity:.84;stroke-linecap:round}
 .swarm-battlefield__vector[data-kind='tasks_done'] .swarm-battlefield__vector-path{stroke:var(--x-done)}
 .swarm-battlefield__vector[data-kind='message_sent'] .swarm-battlefield__vector-path{stroke:var(--x-accent)}
-.swarm-battlefield__vector[data-kind='waiting_on'] .swarm-battlefield__vector-path{stroke:var(--x-meta)}
+.swarm-battlefield__vector[data-kind='waiting_on'] .swarm-battlefield__vector-path{stroke:var(--x-secondary)}
 .swarm-graph__marker--done{fill:var(--x-done)}
 .swarm-graph__marker--msg{fill:var(--x-accent)}
-.swarm-graph__marker--wait{fill:var(--x-meta)}
+.swarm-graph__marker--wait{fill:var(--x-secondary)}
 
 /* Floating member inspector tooltip */
 .swarm-graph__tooltip{position:absolute;top:10px;right:14px;z-index:10;pointer-events:none;display:flex;flex-direction:column;gap:4px;max-width:260px;padding:8px 10px;border:1px solid var(--x-hairline);border-radius:8px;background:var(--x-dialog,var(--x-card));box-shadow:var(--x-elev)}

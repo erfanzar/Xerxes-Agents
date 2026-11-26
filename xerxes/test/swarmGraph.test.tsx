@@ -853,6 +853,7 @@ describe('SwarmGraph React component rendering', () => {
     const atelierCss = await Bun.file(new URL('../src/desktop/renderer/atelier.css', import.meta.url)).text()
     expect(atelierCss).toContain('.swarm-graph__stage{position:relative;flex:1 1 auto;min-height:260px;overflow:auto;display:flex;align-items:flex-start;justify-content:center;padding:8px 12px}')
     expect(atelierCss).toContain('.swarm-graph__svg{display:block;width:100%;height:auto;max-width:860px;margin:auto 0;flex-shrink:0;overflow:visible;user-select:none}')
-    expect(atelierCss).toContain(".swarm-graph__edge[data-dense='true']{opacity:.14}")
+    expect(atelierCss).toContain(".swarm-graph__edge[data-dense='true']{opacity:.62}")
+    expect(atelierCss).toContain('.swarm-graph__edge path{stroke:color-mix(in srgb,var(--x-secondary) 82%,transparent);stroke-linecap:round;')
   })
 })

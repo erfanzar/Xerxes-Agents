@@ -347,11 +347,11 @@ export const SwarmGraph = memo(function SwarmGraph({
           strokeWidth={
             isHighlighted
               ? highFanoutFocus
-                ? 1.35
-                : Math.max(2, pe.strokeWidth)
+                ? 1.65
+                : Math.max(2.1, pe.strokeWidth)
               : isAmbientDense
-                ? 1
-                : pe.strokeWidth
+                ? 1.3
+                : Math.max(1.35, pe.strokeWidth)
           }
           strokeDasharray={pe.dashed ? '4 3' : undefined}
           markerEnd={`url(#${markerId})`}
@@ -1120,8 +1120,8 @@ export const SwarmGraph = memo(function SwarmGraph({
                 viewBox="0 0 10 10"
                 refX="8"
                 refY="5"
-                markerWidth="5.5"
-                markerHeight="5.5"
+                markerWidth="6.5"
+                markerHeight="6.5"
                 orient="auto-start-reverse"
               >
                 <path d="M 1 2 L 9 5 L 1 8 z" className="swarm-graph__marker--mention" />
@@ -1131,8 +1131,8 @@ export const SwarmGraph = memo(function SwarmGraph({
                 viewBox="0 0 10 10"
                 refX="8"
                 refY="5"
-                markerWidth="6"
-                markerHeight="6"
+                markerWidth="6.8"
+                markerHeight="6.8"
                 orient="auto-start-reverse"
               >
                 <path d="M 1 2 L 9 5 L 1 8 z" className="swarm-graph__marker--active" />
@@ -1142,8 +1142,8 @@ export const SwarmGraph = memo(function SwarmGraph({
                 viewBox="0 0 10 10"
                 refX="8"
                 refY="5"
-                markerWidth="5"
-                markerHeight="5"
+                markerWidth="6"
+                markerHeight="6"
                 orient="auto-start-reverse"
               >
                 <path d="M 1 2 L 9 5 L 1 8 z" className="swarm-graph__marker--broadcast" />
