@@ -3696,7 +3696,7 @@ test("daemon resumes only initialize resume IDs and lists saved sessions separat
       ok: true,
       daemon_protocol: 35,
       daemon_build_id: expect.any(String),
-      daemon_version: "0.8.60",
+      daemon_version: "0.8.61",
       provider_account_isolation_v1_supported: true,
       session: { id: firstSessionId, key: firstSessionId, messages: 2 },
     });

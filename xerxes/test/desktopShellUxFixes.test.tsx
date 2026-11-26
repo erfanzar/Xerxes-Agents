@@ -264,11 +264,36 @@ describe('Fix 6: QuestionCard ⌘↵ submission and valid ARIA', () => {
     expect(html).not.toContain('<label class="vq__opt vq__opt--other"')
     expect(html).toContain('class="vq__other-toggle"')
     expect(html).toContain('aria-label="Other answer"')
+    expect(html).toContain('class="vq__other-input"')
+    expect(html).toContain('<textarea')
 
     const appSrc = readFileSync(join(RENDERER_DIR, 'App.tsx'), 'utf8')
     const qSlice = appSrc.slice(appSrc.indexOf('export function QuestionCard('), appSrc.indexOf('function PlanReviewCard('))
     expect(qSlice).toContain('handleCardKeyDown')
     expect(qSlice).toContain('if (modEnter)')
+
+    // Multi-question cards render dedicated numbered badges (never Markdown <ol> list indentation),
+    // full-width Other textareas, and a clear remaining-question status indicator in the footer.
+    const multiHtml = renderToStaticMarkup(
+      createElement(QuestionCard, {
+        plan: null,
+        question: {
+          requestId: 'q-multi',
+          items: [
+            { id: 'q1', question: 'Which commit should be exported?', options: ['Current main', 'Exact commit'], allowFreeform: true },
+            { id: 'q2', question: 'How should we handle Ray?', options: ['Stop Ray', 'Leave running'], allowFreeform: true },
+          ],
+        },
+      }),
+    )
+    expect(multiHtml).toContain('class="vq__num"')
+    expect(multiHtml).not.toContain('<ol><li><span class="md__item">Which commit')
+    expect(multiHtml).toContain('0 of 2 answered · Answer #1 to submit')
+    expect(multiHtml.match(/class="vq__other-input"/g)).toHaveLength(2)
+
+    const vibesCss = readFileSync(join(RENDERER_DIR, 'vibes.css'), 'utf8')
+    expect(vibesCss).toContain('.vq__item+.vq__item{border-top:1px solid var(--x-separator)}')
+    expect(vibesCss).toContain('.vq__other-input{flex:1 1 auto;width:100%;min-width:0;')
   })
 })
 

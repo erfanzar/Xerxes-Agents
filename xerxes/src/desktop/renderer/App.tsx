@@ -3301,10 +3301,25 @@ export function QuestionCard({
   const isUrlMode = question.mode === 'url'
   const review = !isUrlMode && isPlanReview(question)
   const vibes = useVibesStyle()
-  const canSubmit = question.items.length > 0 && question.items.every(item =>
-    (item.allowFreeform && !!others[item.id]?.trim()) || (selections[item.id]?.length ?? 0) > 0)
+  const isItemAnswered = (item: NonNullable<Snapshot['question']>['items'][number]): boolean =>
+    (item.allowFreeform && Boolean(others[item.id]?.trim())) || (selections[item.id]?.length ?? 0) > 0
+  const missingIndices = question.items
+    .map((item, idx) => (isItemAnswered(item) ? -1 : idx))
+    .filter(idx => idx >= 0)
+  const answeredCount = question.items.length - missingIndices.length
+  const canSubmit = question.items.length > 0 && missingIndices.length === 0
+  const focusQuestionItem = (index: number): void => {
+    const section = cardRef.current?.querySelector<HTMLElement>(`[data-vq-index="${index}"]`)
+    if (!section) return
+    section.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' })
+    const target = section.querySelector<HTMLElement>('button[role="radio"], button[role="checkbox"], textarea, input')
+    target?.focus()
+  }
   const submit = (): void => {
-    if (!canSubmit) return
+    if (!canSubmit) {
+      if (missingIndices[0] !== undefined) focusQuestionItem(missingIndices[0])
+      return
+    }
     store.answerQuestion(question.requestId, formatQuestionAnswers(question.items, selections, others))
   }
   const handleCardKeyDown = (event: React.KeyboardEvent<HTMLDivElement>): void => {
@@ -3394,11 +3409,25 @@ export function QuestionCard({
             const picked = selections[item.id] ?? []
             const other = others[item.id] ?? ''
             const multi = item.multiSelect === true
+            const answered = isItemAnswered(item)
             return (
-              <div key={item.id} className="vq__item" data-multi={multi ? 'true' : undefined}>
+              <div
+                key={item.id}
+                className="vq__item"
+                data-vq-index={qi}
+                data-answered={answered ? 'true' : undefined}
+                data-multi={multi ? 'true' : undefined}
+              >
                 <div className="vq__q">
-                  <Markdown text={`${question.items.length > 1 ? `${qi + 1}. ` : ''}${item.question}`} className="md--compact" />
-                  {multi && <span className="vq__multi-hint">Select all that apply</span>}
+                  {question.items.length > 1 && (
+                    <span className="vq__num" data-answered={answered ? 'true' : undefined} aria-hidden="true">
+                      {answered ? <Icon name="check" size={11} /> : qi + 1}
+                    </span>
+                  )}
+                  <div className="vq__qtext">
+                    <Markdown text={item.question} className="md--compact" />
+                    {multi && <span className="vq__multi-hint">Select all that apply</span>}
+                  </div>
                 </div>
                 <div className="vq__opts" role={multi ? 'group' : 'radiogroup'} aria-label={item.question}>
                   {item.options.map(option => {
@@ -3430,6 +3459,12 @@ export function QuestionCard({
                     <div
                       className="vq__opt vq__opt--other"
                       data-checked={other.trim() !== '' ? 'true' : 'false'}
+                      onClick={event => {
+                        const target = event.target as HTMLElement | null
+                        if (target?.closest('textarea, input, button')) return
+                        const field = event.currentTarget.querySelector<HTMLElement>('textarea, input')
+                        field?.focus()
+                      }}
                     >
                       <button
                         type="button"
@@ -3438,8 +3473,8 @@ export function QuestionCard({
                         aria-label={item.placeholder || 'Other'}
                         className="vq__other-toggle"
                         onClick={event => {
-                          const input = event.currentTarget.parentElement?.querySelector<HTMLInputElement>('input')
-                          input?.focus()
+                          const field = event.currentTarget.parentElement?.querySelector<HTMLElement>('textarea, input')
+                          field?.focus()
                           if (!multi) setSelections(prev => ({ ...prev, [item.id]: [] }))
                         }}
                       >
@@ -3447,17 +3482,28 @@ export function QuestionCard({
                           ? <span className="vq__check" aria-hidden="true">{other.trim() !== '' ? <Icon name="check" size={12} /> : null}</span>
                           : <span className="vq__radio" aria-hidden="true" />}
                       </button>
-                      <input
+                      <textarea
+                        rows={1}
+                        className="vq__other-input"
                         aria-label="Other answer"
-                        placeholder={item.placeholder || 'Other'}
+                        placeholder={item.placeholder || 'Type a custom answer…'}
                         spellCheck={false}
                         value={other}
                         onChange={e => {
-                          const value = e.target.value
+                          const el = e.currentTarget
+                          el.style.height = 'auto'
+                          el.style.height = `${Math.min(el.scrollHeight, 160)}px`
+                          const value = el.value
                           setOthers(prev => ({ ...prev, [item.id]: value }))
                           if (!multi) setSelections(prev => ({ ...prev, [item.id]: [] }))
                         }}
-                        onKeyDown={e => { if (!e.nativeEvent.isComposing && e.key === 'Enter' && (e.metaKey || e.ctrlKey || !e.shiftKey)) { e.preventDefault(); e.stopPropagation(); submit() } }}
+                        onKeyDown={e => {
+                          if (!e.nativeEvent.isComposing && e.key === 'Enter' && (e.metaKey || e.ctrlKey || !e.shiftKey)) {
+                            e.preventDefault()
+                            e.stopPropagation()
+                            submit()
+                          }
+                        }}
                       />
                     </div>
                   )}
@@ -3466,6 +3512,23 @@ export function QuestionCard({
             )
           })}
           <div className="vq__actions">
+            {question.items.length > 1 && (
+              missingIndices.length > 0
+                ? (
+                  <button
+                    type="button"
+                    className="vq__status vq__status--pending"
+                    onClick={() => focusQuestionItem(missingIndices[0]!)}
+                  >
+                    {answeredCount} of {question.items.length} answered · Answer #{missingIndices[0]! + 1} to submit
+                  </button>
+                )
+                : (
+                  <span className="vq__status vq__status--ready">
+                    <Icon name="check" size={12} /> All {question.items.length} answered
+                  </span>
+                )
+            )}
             {skippable && <button type="button" className="vq__skip" title="Answer “Skipped” and let the agent continue" onClick={skip}>Skip</button>}
             <button type="button" className="vq__submit" disabled={!canSubmit} onClick={submit}>Submit <kbd>⌘</kbd><kbd>↵</kbd></button>
           </div>
@@ -3487,7 +3550,8 @@ export function QuestionCard({
             {/* The question is the agent's prose: paths in backticks and short
                 lists read as they were written, not as raw markup. */}
             <div className="qcard__q">
-              <Markdown text={`${question.items.length > 1 ? `${qi + 1}. ` : ''}${item.question}`} className="md--compact" />
+              {question.items.length > 1 && <span className="vq__num" data-answered={isItemAnswered(item) ? 'true' : undefined} aria-hidden="true">{qi + 1}</span>}
+              <Markdown text={item.question} className="md--compact" />
               {multi && <span className="vq__multi-hint">Select all that apply</span>}
             </div>
             {item.options.length > 0 && (

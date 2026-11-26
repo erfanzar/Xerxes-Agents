@@ -7,6 +7,10 @@ describe the earlier implementation and are not current setup instructions.
 
 ---
 
+## 0.8.61 — 2026-11-26
+
+- **Overhaul Desktop `QuestionCard` (`Needs your input`) layout & freeform `Other` input.** Restores and upgrades `.vq` styling lost in the `v0.8.52` stylesheet rewrite: replaces the narrow single-line `Other` `<input>` with a full-width, auto-wrapping `<textarea rows={1}>` (`flex: 1 1 auto; width: 100%; field-sizing: content`) and click-anywhere row focus so long custom answers never shift horizontally; replaces Markdown-indented `1.` / `2.` question titles with dedicated numbered step badges (`.vq__num`) inside clearly separated `.vq__q` headers and `.vq__item + .vq__item` dividers; adds cobalt selection highlighting and focus rails; and adds a live clickable footer status cue (`1 of 2 answered · Answer #1 to submit` → `✓ All 2 answered`) with automatic jump-to-unanswered-question on `Enter`.
+
 ## 0.8.60 — 2026-11-26
 
 - **Fast SSH connections & instant same-host chat switching.** Introduces a ref-counted, host-keyed `SharedRemoteTunnelPool` (`src/desktop/main/remoteTunnelPool.ts`) so multiple views and folders on the same SSH host multiplex over a single `-o Compression=yes` SSH tunnel with single-flight open and reconnect coalescing; reuses idle same-host remote views in-place (`reuseIdle`) instead of spawning fresh `WebContentsView`s and redundant SSH handshakes; moves remote provider CLI checks to the background and short-circuits `ensureRemoteProviderClis` after 1 SSH round-trip when all CLIs are installed; caches session-scoped SSH host verification and throttles idle remote `session.list`/`session.active_list`/`acp.agents` polling; fixes false `Reconnecting…` banners on initial resume and makes `DaemonRpc.onData` line framing `O(N)`.
