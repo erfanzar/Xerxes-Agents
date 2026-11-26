@@ -54,6 +54,20 @@ export function sessionHistoryActions(session: Pick<DaemonSession, 'messages' | 
       ...(result !== undefined ? [{ role: 'tool', tool_call_id: id, content: result } as RawMessage] : []),
     ], executions: executions.has(id) ? [execution] : [], thinking: [] })
   }
+  const hasVisibleContent = (msg: RawMessage): boolean => {
+    const raw = Array.isArray(msg.content)
+      ? msg.content.filter(p => !['tool_use', 'tool_result'].includes(String(record(p).type)))
+      : msg.content
+    return typeof raw === 'string' ? raw.trim().length > 0 : Array.isArray(raw) && raw.length > 0
+  }
+  const hasLaterAssistantTextInTurn = (fromIndex: number): boolean => {
+    for (let j = fromIndex + 1; j < session.messages.length; j += 1) {
+      const next = session.messages[j]!
+      if (next.role === 'user') return false
+      if (next.role === 'assistant' && hasVisibleContent(next)) return true
+    }
+    return false
+  }
   session.messages.forEach((m, index) => {
     try {
       if (m.role === 'system') return
@@ -65,10 +79,23 @@ export function sessionHistoryActions(session: Pick<DaemonSession, 'messages' | 
       const content = Array.isArray(m.content) ? m.content.filter(p => !['tool_use', 'tool_result'].includes(String(record(p).type))) : m.content
       const thinking = m.role === 'assistant' ? m.thinking ?? session.thinkingContent[assistant] : undefined
       if (m.role === 'assistant') assistant++
-      if ((typeof content === 'string' ? content.trim().length > 0 : Array.isArray(content) && content.length > 0) || thinking) {
-        actions.push({ id: `${index}:message`, messages: [{ ...m, content, tool_calls: undefined, turn_outcome: undefined }], executions: [], thinking: thinking ? [thinking] : [] })
+      const hasContent = typeof content === 'string' ? content.trim().length > 0 : Array.isArray(content) && content.length > 0
+      const msgCalls = callRecords(m)
+      // When a flat assistant message bundles both its final answer and tool calls
+      // with no later assistant reply in the same turn, place thinking + tools
+      // BEFORE the final answer so the tool summary sits above the final message.
+      if (m.role === 'assistant' && hasContent && msgCalls.length > 0 && !hasLaterAssistantTextInTurn(index)) {
+        if (thinking) {
+          actions.push({ id: `${index}:thinking`, messages: [{ role: 'assistant', content: '', thinking }], executions: [], thinking: [thinking] })
+        }
+        msgCalls.forEach((call, offset) => { if (typeof call.id === 'string') tool(call.id, call, `${index}:tool:${offset}`) })
+        actions.push({ id: `${index}:message`, messages: [{ ...m, content, thinking: undefined, tool_calls: undefined, turn_outcome: undefined }], executions: [], thinking: [] })
+      } else {
+        if (hasContent || thinking) {
+          actions.push({ id: `${index}:message`, messages: [{ ...m, content, tool_calls: undefined, turn_outcome: undefined }], executions: [], thinking: thinking ? [thinking] : [] })
+        }
+        msgCalls.forEach((call, offset) => { if (typeof call.id === 'string') tool(call.id, call, `${index}:tool:${offset}`) })
       }
-      callRecords(m).forEach((call, offset) => { if (typeof call.id === 'string') tool(call.id, call, `${index}:tool:${offset}`) })
     } finally {
       const outcome = readTurnOutcome(m.turn_outcome)
       if (outcome) actions.push({ id: `${index}:outcome`, messages: [{ role: "assistant", content: "", turn_outcome: outcome }], executions: [], thinking: [] })

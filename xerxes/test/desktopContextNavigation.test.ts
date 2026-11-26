@@ -57,3 +57,57 @@ test('context navigation bounds session identities, absolute paths, titles and r
   ])
   expect(contextSessions(Array.from({ length: 1000 }, (_, i) => ({ id: `chat-${i}`, cwd: '/repo' })), [])).toHaveLength(200)
 })
+
+test('contextSessions preserves runtime provider, turn start timestamp, activity age, and branch across saved and live rows', () => {
+  const startedSec = 1_795_650_000
+  const updatedSec = 1_795_650_300
+  const merged = contextSessions(
+    [
+      {
+        id: 'agy-1',
+        cwd: '/home/erfan/easydel-src',
+        title: 'Update EasyDeL TPU Slice Serving',
+        status: 'idle',
+        acp_provider: 'antigravity',
+        updated_at: updatedSec,
+        branch: 'main',
+      },
+      {
+        id: 'claude-2',
+        cwd: '/home/erfan/easydel-src',
+        title: 'Audit training loop',
+        status: 'idle',
+        acp_agent_id: 'claude-code',
+        updated_at: updatedSec - 120,
+      },
+    ],
+    [
+      {
+        session_id: 'agy-1',
+        cwd: '/home/erfan/easydel-src',
+        active_turn_id: 'turn-7',
+        inflight: { started_at: startedSec },
+      },
+    ],
+  )
+  expect(merged).toEqual([
+    {
+      id: 'agy-1',
+      cwd: '/home/erfan/easydel-src',
+      title: 'Update EasyDeL TPU Slice Serving',
+      status: 'working',
+      provider: 'antigravity',
+      turnStartedAt: startedSec * 1000,
+      activeAt: updatedSec * 1000,
+      branch: 'main',
+    },
+    {
+      id: 'claude-2',
+      cwd: '/home/erfan/easydel-src',
+      title: 'Audit training loop',
+      status: 'idle',
+      provider: 'claude-code',
+      activeAt: (updatedSec - 120) * 1000,
+    },
+  ])
+})

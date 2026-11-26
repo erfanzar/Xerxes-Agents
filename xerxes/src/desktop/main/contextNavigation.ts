@@ -2,7 +2,16 @@
 // Licensed under the Apache License, Version 2.0.
 import type { RemoteTarget } from './remote.js'
 
-export interface ContextSession { id: string; cwd: string; title: string; status: string }
+export interface ContextSession {
+  id: string
+  cwd: string
+  title: string
+  status: string
+  provider?: string
+  turnStartedAt?: number
+  activeAt?: number
+  branch?: string
+}
 export interface WorkspaceContext {
   id: number
   label: string
@@ -77,6 +86,45 @@ export function latestSessionIn(rows: readonly ContextSession[], folder: string)
 export function sameRemote(left: RemoteTarget | null | undefined, right: RemoteTarget): boolean {
   return Boolean(left) && left!.target === right.target && cleanFolder(left!.workspacePath) === cleanFolder(right.workspacePath)
 }
+function sanitizeEpochMs(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return value > 1e11 ? Math.round(value) : Math.round(value * 1000)
+  }
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Date.parse(value)
+    if (Number.isFinite(parsed) && parsed > 0) return parsed
+  }
+  return undefined
+}
+
+function sanitizeProvider(row: Record<string, unknown>): string | undefined {
+  const binding =
+    row.acp_binding && typeof row.acp_binding === 'object' && !Array.isArray(row.acp_binding)
+      ? (row.acp_binding as Record<string, unknown>)
+      : row.saved_acp_binding && typeof row.saved_acp_binding === 'object' && !Array.isArray(row.saved_acp_binding)
+        ? (row.saved_acp_binding as Record<string, unknown>)
+        : null
+  if (binding && typeof binding.transport === 'string' && binding.transport.trim().toLowerCase() === 'native') {
+    return undefined
+  }
+  const raw =
+    (binding && (typeof binding.provider === 'string' && binding.provider.trim() ? binding.provider : binding.agent_id))
+    ?? row.provider
+    ?? row.acp_provider
+    ?? row.acp_agent_id
+  if (typeof raw !== 'string') return undefined
+  const clean = raw.trim().toLowerCase()
+  if (!clean || clean === 'xerxes' || !/^[a-z0-9._-]{1,64}$/.test(clean)) return undefined
+  return clean
+}
+
+function sanitizeBranch(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.trim()
+  if (!trimmed || trimmed.length > 200 || /[\x00-\x1f\x7f]/.test(trimmed)) return undefined
+  return trimmed
+}
+
 /** Keep remote/local session identities separate; live state wins within one endpoint. */
 export function contextSessions(saved: unknown, live: unknown): ContextSession[] {
   const rows = new Map<string, ContextSession>()
@@ -89,9 +137,24 @@ export function contextSessions(saved: unknown, live: unknown): ContextSession[]
         typeof row.cwd !== 'string' || !row.cwd.startsWith('/') || row.cwd.length > 4096 || /[\x00-\x1f\x7f]/.test(row.cwd)) continue
     const previous = rows.get(id)
     const title = typeof row.title === 'string' ? row.title.replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, 512).trim() : ''
-    rows.set(id, { id, cwd: row.cwd,
+    const status = row.active_turn_id || row.status === 'working' || row.status === 'acting' ? 'working' : row.status === 'failed' ? 'failed' : 'idle'
+    const provider = sanitizeProvider(row) ?? previous?.provider
+    const inflight = row.inflight && typeof row.inflight === 'object' && !Array.isArray(row.inflight)
+      ? (row.inflight as Record<string, unknown>)
+      : null
+    const rawTurnStart = sanitizeEpochMs(inflight?.started_at ?? row.turnStartedAt ?? row.turn_started_at)
+    const turnStartedAt = status === 'working' ? (rawTurnStart ?? previous?.turnStartedAt) : undefined
+    const activeAt = sanitizeEpochMs(row.activeAt ?? row.updated_at ?? row.last_active) ?? previous?.activeAt
+    const branch = sanitizeBranch(row.branch) ?? previous?.branch
+    rows.set(id, {
+      id,
+      cwd: row.cwd,
       title: title || previous?.title || `Session ${id.slice(0, 8)}`,
-      status: row.active_turn_id || row.status === 'working' || row.status === 'acting' ? 'working' : row.status === 'failed' ? 'failed' : 'idle',
+      status,
+      ...(provider ? { provider } : {}),
+      ...(turnStartedAt !== undefined ? { turnStartedAt } : {}),
+      ...(activeAt !== undefined ? { activeAt } : {}),
+      ...(branch ? { branch } : {}),
     })
   }
   return [...rows.values()]

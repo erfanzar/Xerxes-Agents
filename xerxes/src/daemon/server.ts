@@ -1443,6 +1443,35 @@ class AcpTurnTranscriptRecorder {
     }
   }
 
+  /** Non-mutating chronological snapshot of the in-flight turn for mid-turn reattach. */
+  snapshot(maxMessages = 80): {
+    readonly messages: Array<DaemonSession["messages"][number]>;
+    readonly toolExecutions: Array<Record<string, unknown>>;
+  } {
+    const messages: Array<DaemonSession["messages"][number]> = [...this.messages];
+    if (this.stepThinking || this.stepText || this.stepToolCalls.length > 0) {
+      messages.push({
+        role: "assistant",
+        content: this.stepText,
+        ...(this.stepThinking ? { thinking: this.stepThinking } : {}),
+        ...(this.stepToolCalls.length > 0 ? { tool_calls: [...this.stepToolCalls] } : {}),
+      });
+    }
+    for (const toolMsg of this.stepToolResults) {
+      messages.push({ ...toolMsg });
+    }
+    const trimmedMessages = messages.slice(-maxMessages).map((msg) => {
+      if (msg.role === "tool" && typeof msg.content === "string" && msg.content.length > 8_000) {
+        return { ...msg, content: `${msg.content.slice(0, 8_000)}…` };
+      }
+      return msg;
+    });
+    return {
+      messages: trimmedMessages,
+      toolExecutions: this.toolExecutions.slice(-maxMessages).map((exec) => ({ ...exec })),
+    };
+  }
+
   commitTo(session: DaemonSession): boolean {
     if (this.committed) return false;
     this.committed = true;
@@ -4776,6 +4805,11 @@ export class DaemonServer {
                 submissionId,
                 digest,
               });
+              this.emit(connection, "notification", {
+                session_id: session.id,
+                level: "info",
+                message: "Live steer could not interrupt the active step — queued to run next.",
+              });
               if (
                 !this.sessionBusy(key, session) &&
                 !this.acpBridgeHost.hasActiveTurn(session.id) &&
@@ -6273,6 +6307,11 @@ export class DaemonServer {
       ? acpCost?.amount
       : (session.model ? this.sessionCost(session, session.model) : undefined);
     const basis = liveAcpBinding ? undefined : this.sessionCostBasis(session);
+    const inflightChronology =
+      session.activeTurnId && requestedHistory !== 0
+        ? (this.activeAcpTurnRecorders.get(session.id) ??
+            this.acpOutOfTurnWakeups.get(session.id)?.recorder)?.snapshot(80)
+        : undefined;
     const payload = sessionPayload(
       session,
       contextLimit,
@@ -6281,6 +6320,7 @@ export class DaemonServer {
       requestedHistory,
       historySession,
       this.resolveSessionTodos(session),
+      inflightChronology,
     );
     const agyLoc = this.resolveAgyBrainLocationForSession(session);
     const agySubagents = agyLoc ? this.agyBrainBridge.listSubagentSnapshotsSync(agyLoc) : [];
@@ -19667,6 +19707,10 @@ function sessionPayload(
   requestedHistory?: number,
   historySession: DaemonSession = session,
   resolvedTodos?: readonly Record<string, unknown>[],
+  inflightChronology?: {
+    readonly messages: Array<DaemonSession["messages"][number]>;
+    readonly toolExecutions: Array<Record<string, unknown>>;
+  },
 ): JsonRpcPayload {
   const model = session.model;
   const contextTokens = sessionContextTokens(session, model);
@@ -19743,6 +19787,12 @@ function sessionPayload(
               : {}),
             ...(session.inflightTools?.length
               ? { tools: session.inflightTools.map((tool) => ({ ...tool })) }
+              : {}),
+            ...(inflightChronology?.messages.length
+              ? { messages: inflightChronology.messages }
+              : {}),
+            ...(inflightChronology?.toolExecutions.length
+              ? { executions: inflightChronology.toolExecutions.map(replayExecutionPayload) }
               : {}),
           },
         }
@@ -20009,6 +20059,8 @@ function savedSessionPayload(session: SavedDaemonSession): JsonRpcPayload {
     // The workspace grouping key: which project folder the chat ran in.
     cwd: session.cwd,
     ...(session.model ? { model: session.model } : {}),
+    ...(session.acpProvider ? { acp_provider: session.acpProvider } : {}),
+    ...(session.acpAgentId ? { acp_agent_id: session.acpAgentId } : {}),
     ...(session.parentSessionId
       ? { parent_session_id: session.parentSessionId }
       : {}),

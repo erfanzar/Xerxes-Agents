@@ -1390,6 +1390,19 @@ function compactListingMetadata(metadata: Readonly<Record<string, unknown>>): Re
       compact[key] = metadata[key]
     }
   }
+  if (isRecord(metadata.acp_binding)) {
+    const binding = metadata.acp_binding
+    const agentId = typeof binding.agent_id === 'string' ? binding.agent_id.trim() : ''
+    const provider = typeof binding.provider === 'string' ? binding.provider.trim() : ''
+    const transport = typeof binding.transport === 'string' ? binding.transport.trim() : ''
+    if (agentId || provider) {
+      compact.acp_binding = {
+        ...(agentId ? { agent_id: agentId } : {}),
+        ...(provider ? { provider } : {}),
+        ...(transport ? { transport } : {}),
+      }
+    }
+  }
   return compact
 }
 

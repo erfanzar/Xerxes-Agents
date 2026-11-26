@@ -1293,6 +1293,8 @@ export interface StoredHydration {
   readonly executions?: unknown
   /** Per-assistant-turn reasoning — the session record's `thinking_content`. */
   readonly thinking?: unknown
+  /** When true, keep unsettled tools as `working` instead of finalizing them to `failed`. */
+  readonly live?: boolean
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -1356,7 +1358,29 @@ export function blocksFromStoredMessages(messages: unknown, hydration: StoredHyd
   const calls = new Map<string, Record<string, unknown>>()
   let executionIndex = 0
   let assistantIndex = 0
-  for (const message of messages) {
+  let deferredFinalAssistantText: string | null = null
+  const flushDeferredText = (): void => {
+    if (deferredFinalAssistantText !== null) {
+      builder.push('text_part', { text: deferredFinalAssistantText })
+      deferredFinalAssistantText = null
+    }
+  }
+  const hasLaterAssistantTextInTurn = (fromIndex: number): boolean => {
+    for (let j = fromIndex + 1; j < messages.length; j += 1) {
+      const candidate = messages[j]
+      if (!candidate || typeof candidate !== 'object') continue
+      const rec = candidate as Record<string, unknown>
+      if (rec.role === 'user') return false
+      if (rec.role === 'assistant') {
+        const c = transcriptContent(rec)
+        if (typeof c === 'string' && c.trim().length > 0) return true
+        if (Array.isArray(c) && c.some(p => isRecord(p) && typeof p.text === 'string' && p.text.trim().length > 0)) return true
+      }
+    }
+    return false
+  }
+  for (let msgIndex = 0; msgIndex < messages.length; msgIndex += 1) {
+    const message = messages[msgIndex]
     if (!message || typeof message !== 'object') continue
     const record = message as Record<string, unknown>
     const role = typeof record.role === 'string' ? record.role : ''
@@ -1388,6 +1412,7 @@ export function blocksFromStoredMessages(messages: unknown, hydration: StoredHyd
       executionIndex += 1
       continue
     }
+    flushDeferredText()
 
     // Reasoning precedes its answer, as it streamed. Prefer per-message thinking
     // when stored inline so multi-step ACP/native turns never drift against thinking_content.
@@ -1432,7 +1457,15 @@ export function blocksFromStoredMessages(messages: unknown, hydration: StoredHyd
       // The harness wrote it (goal round, monitor, reminder): not shown.
       if (role === 'user' && (harnessOriginOf(record.origin) || isLegacyHarnessPrompt(content))) { emitCalls(); continue }
       if (role === 'user') builder.pushUser(content, record.xerxes_compaction_summary === true)
-      else if (role === 'assistant') builder.push('text_part', { text: content })
+      else if (role === 'assistant') {
+        const hasToolCalls = Array.isArray(record.tool_calls) && record.tool_calls.length > 0
+        if (hasToolCalls && !hasLaterAssistantTextInTurn(msgIndex)) {
+          emitCalls()
+          deferredFinalAssistantText = content
+          continue
+        }
+        builder.push('text_part', { text: content })
+      }
       else if (role !== 'system') builder.push('think_part', { think: content })
       emitCalls()
       continue
@@ -1442,6 +1475,14 @@ export function blocksFromStoredMessages(messages: unknown, hydration: StoredHyd
     // a thinking block then an agent block, matching the live run grammar.
     const userParts: string[] = []
     const userImages: string[] = []
+    const hasInlineToolUse = content.some(part => isRecord(part) && part.type === 'tool_use')
+    const deferArrayAssistantText =
+      role === 'assistant'
+      && !hasInlineToolUse
+      && Array.isArray(record.tool_calls)
+      && record.tool_calls.length > 0
+      && !hasLaterAssistantTextInTurn(msgIndex)
+    const deferredParts: string[] = []
     for (const part of content) {
       if (!part || typeof part !== 'object') continue
       const p = part as Record<string, unknown>
@@ -1471,6 +1512,7 @@ export function blocksFromStoredMessages(messages: unknown, hydration: StoredHyd
       if (think) builder.push('think_part', { think })
       if (text) {
         if (role === 'user') userParts.push(text)
+        else if (deferArrayAssistantText) deferredParts.push(text)
         else builder.push('text_part', { text })
       }
     }
@@ -1483,6 +1525,10 @@ export function blocksFromStoredMessages(messages: unknown, hydration: StoredHyd
       }
     }
     emitCalls()
+    if (deferredParts.length > 0) {
+      deferredFinalAssistantText = deferredParts.join('')
+    }
   }
-  return [...builder.all()]
+  flushDeferredText()
+  return hydration.live ? [...builder.snapshot(true)] : [...builder.all()]
 }

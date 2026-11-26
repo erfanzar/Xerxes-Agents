@@ -15,7 +15,7 @@
  */
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from 'react'
-import { store, type Snapshot } from './store.js'
+import { ageOf, store, type Snapshot } from './store.js'
 import { PickerLayer } from './Overlays.js'
 import { ProjectMonogram } from './ProjectMonogram.js'
 import { T3Icon } from './T3Icons.js'
@@ -31,14 +31,18 @@ import {
   isSnoozedActive,
   normalizeWorkspacePath,
   partitionInboxThreads,
+  recordThreadMetaObservations,
   snoozePresets,
+  useThreadMetaCache,
   type InboxUndoEntry,
   type SidebarViewMode,
   type ThreadInboxState,
+  type ThreadMetaObservation,
 } from './threadInbox.js'
 import {
   SIDEBAR_SECTION_ROWS,
   THIS_MAC,
+  hostOfScope,
   limitRows,
   loadCollapsedSections,
   saveCollapsedSections,
@@ -47,6 +51,26 @@ import {
 } from './workspaceGroups.js'
 import { requestWorkspaceSshForm, type DesktopPageName, type DesktopPanel } from './DesktopPanels.js'
 
+/** Map wire/cached provider or ACP agent IDs onto Desktop's brand icon set. */
+export function brandProviderOf(raw: unknown): AgentBrandProvider | undefined {
+  if (typeof raw !== 'string') return undefined
+  const clean = raw.trim().toLowerCase()
+  if (!clean) return undefined
+  if (clean === 'xerxes' || clean === 'native') return 'xerxes'
+  if (
+    clean === 'antigravity'
+    || clean === 'agy'
+    || clean.includes('antigravity')
+    || clean.startsWith('agy-')
+    || clean.startsWith('agy_')
+  ) {
+    return 'antigravity'
+  }
+  if (clean === 'claude' || clean === 'claude-code' || clean.includes('claude')) return 'claude-code'
+  if (clean === 'codex' || clean.includes('codex')) return 'codex'
+  return 'acp'
+}
+
 export interface T3SidebarRow {
   readonly id: string
   readonly key: string
@@ -54,6 +78,8 @@ export interface T3SidebarRow {
   readonly snippet?: string
   readonly status: string
   readonly age: string
+  readonly turnStartedAt?: number
+  readonly activeAt?: number
   readonly current: boolean
   readonly turns: number
   readonly cwd: string
@@ -62,6 +88,7 @@ export interface T3SidebarRow {
   readonly host?: string
   readonly contextId?: number
   readonly opensWindow?: boolean
+  readonly offline?: boolean
 }
 
 export interface MachineSectionGroup<T> {
@@ -430,10 +457,167 @@ export function T3Sidebar({
     () => sections.filter(section => isWorkspaceVisible(section.cwd, section.kind === 'context' && section.context.remote)),
     [sections, hiddenWorkspaceSet],
   )
-  const visibleRows = useMemo(
-    () => allRows.filter(row => row.current || isWorkspaceVisible(row.cwd, Boolean(row.host && row.host !== THIS_MAC))),
-    [allRows, hiddenWorkspaceSet],
-  )
+  const currentHost = snap.contextHost ?? hostOfScope(snap.storageScope) ?? THIS_MAC
+  const threadMeta = useThreadMetaCache()
+
+  const observations = useMemo((): readonly ThreadMetaObservation[] => {
+    const byId = new Map<string, ThreadMetaObservation>()
+    for (const row of allRows) {
+      const host = row.host || (row.contextId === undefined ? currentHost : undefined)
+      const provider = row.current ? activeProvider : row.provider
+      const branch = row.branch || (row.contextId === undefined && row.cwd && row.cwd === snap.cwd ? snap.branch : '')
+      const turnStartedAt = row.current && snap.turnActive && snap.turnStartedAt != null
+        ? snap.turnStartedAt
+        : row.turnStartedAt
+      const activeAt = row.activeAt ?? snap.sessionActivity?.[row.id]
+      byId.set(row.id, {
+        id: row.id,
+        title: row.snippet ?? row.title,
+        ...(row.cwd ? { cwd: row.cwd } : {}),
+        ...(host ? { host } : {}),
+        ...(provider ? { provider, authoritativeProvider: row.current || provider !== 'xerxes' } : {}),
+        ...(branch ? { branch } : {}),
+        status: row.status,
+        ...(turnStartedAt !== undefined ? { turnStartedAt } : {}),
+        ...(activeAt !== undefined ? { activeAt } : {}),
+      })
+    }
+    for (const section of sections) {
+      if (section.kind === 'context') {
+        for (const row of section.rows) {
+          if (byId.has(row.id)) continue
+          const provider = brandProviderOf(row.provider)
+          byId.set(row.id, {
+            id: row.id,
+            title: row.title,
+            cwd: row.cwd || section.cwd,
+            host: section.host,
+            ...(provider ? { provider, authoritativeProvider: provider !== 'xerxes' } : {}),
+            ...(row.branch ? { branch: row.branch } : {}),
+            status: row.status,
+            ...(row.turnStartedAt !== undefined ? { turnStartedAt: row.turnStartedAt } : {}),
+            ...(row.activeAt !== undefined ? { activeAt: row.activeAt } : {}),
+          })
+        }
+      } else {
+        for (const row of section.rows) {
+          if (byId.has(row.id)) continue
+          const provider = row.current ? activeProvider : brandProviderOf(row.provider)
+          const activeAt = row.activeAt ?? snap.sessionActivity?.[row.id]
+          const branch = row.branch || (row.cwd === snap.cwd ? snap.branch : '')
+          byId.set(row.id, {
+            id: row.id,
+            title: snap.snippets[row.id] ?? row.title,
+            cwd: row.cwd || section.cwd,
+            host: section.host,
+            ...(provider ? { provider, authoritativeProvider: row.current || provider !== 'xerxes' } : {}),
+            ...(branch ? { branch } : {}),
+            status: row.status,
+            ...(row.turnStartedAt !== undefined ? { turnStartedAt: row.turnStartedAt } : {}),
+            ...(activeAt !== undefined ? { activeAt } : {}),
+          })
+        }
+      }
+    }
+    return [...byId.values()]
+  }, [allRows, sections, currentHost, activeProvider, snap.cwd, snap.branch, snap.turnActive, snap.turnStartedAt, snap.sessionActivity, snap.snippets])
+
+  useEffect(() => {
+    if (observations.length > 0) {
+      recordThreadMetaObservations(observations)
+    }
+  }, [observations])
+
+  const enrichRow = (row: T3SidebarRow): T3SidebarRow => {
+    const cached = threadMeta[row.id]
+    const host = row.host || (row.contextId === undefined ? currentHost : undefined) || cached?.host
+    const provider: AgentBrandProvider = row.current
+      ? activeProvider
+      : (row.provider ?? brandProviderOf(cached?.provider) ?? 'xerxes')
+    const branch = row.branch
+      || (row.contextId === undefined && row.cwd && row.cwd === snap.cwd ? snap.branch : '')
+      || cached?.branch
+      || ''
+    const working = row.status === 'working' || row.status === 'running'
+    const activeAt = row.activeAt ?? cached?.activeAt
+    const turnStartedAt = working
+      ? (row.current && snap.turnActive && snap.turnStartedAt != null
+          ? snap.turnStartedAt
+          : (row.turnStartedAt ?? cached?.turnStartedAt ?? activeAt))
+      : undefined
+    const age = row.age || (activeAt !== undefined ? ageOf(activeAt) : '')
+    return {
+      ...row,
+      ...(host ? { host } : {}),
+      provider,
+      ...(branch ? { branch } : {}),
+      ...(activeAt !== undefined ? { activeAt } : {}),
+      ...(turnStartedAt !== undefined ? { turnStartedAt } : {}),
+      age,
+    }
+  }
+
+  const visibleRows = useMemo(() => {
+    const live = allRows
+      .filter(row => row.current || isWorkspaceVisible(row.cwd, Boolean(row.host && row.host !== THIS_MAC)))
+      .map(enrichRow)
+    const present = new Set(live.map(row => row.id))
+    const cachedPins: T3SidebarRow[] = []
+    for (const pinnedId of inbox.pinnedIds) {
+      if (present.has(pinnedId)) continue
+      const cached = threadMeta[pinnedId]
+      if (!cached) continue
+      const title = cached.title || `#${pinnedId.slice(0, 6)}`
+      if (needle && !title.toLowerCase().includes(needle) && !pinnedId.includes(needle)) continue
+      const host = cached.host
+      const cwd = cached.cwd || ''
+      const matchedContext = sections.find(
+        (section): section is Extract<typeof section, { kind: 'context' }> =>
+          section.kind === 'context'
+          && Boolean(host && section.host === host)
+          && (!cwd || normalizeWorkspacePath(section.cwd) === normalizeWorkspacePath(cwd)),
+      ) ?? sections.find(
+        (section): section is Extract<typeof section, { kind: 'context' }> =>
+          section.kind === 'context' && Boolean(host && section.host === host),
+      )
+      const provider = brandProviderOf(cached.provider) ?? 'xerxes'
+      const status = cached.status || 'idle'
+      const working = status === 'working' || status === 'running'
+      cachedPins.push({
+        id: pinnedId,
+        key: pinnedId,
+        title,
+        status,
+        age: cached.activeAt !== undefined ? ageOf(cached.activeAt) : '',
+        ...(working && cached.turnStartedAt !== undefined ? { turnStartedAt: cached.turnStartedAt } : {}),
+        ...(cached.activeAt !== undefined ? { activeAt: cached.activeAt } : {}),
+        current: false,
+        turns: 0,
+        cwd,
+        ...(cached.branch ? { branch: cached.branch } : {}),
+        provider,
+        ...(host ? { host } : {}),
+        ...(matchedContext ? { contextId: matchedContext.context.id } : {}),
+        offline: true,
+      })
+    }
+    return cachedPins.length > 0 ? [...live, ...cachedPins] : live
+  }, [allRows, hiddenWorkspaceSet, inbox.pinnedIds, threadMeta, needle, sections, currentHost, activeProvider, snap.cwd, snap.branch, snap.turnActive, snap.turnStartedAt])
+
+  const hasMultipleHosts = useMemo(() => {
+    const hosts = new Set<string>()
+    for (const section of visibleSections) {
+      if (section.host) hosts.add(section.host)
+    }
+    for (const row of visibleRows) {
+      if (row.host) hosts.add(row.host)
+    }
+    if (hosts.size > 1) return true
+    for (const host of hosts) {
+      if (host !== THIS_MAC) return true
+    }
+    return false
+  }, [visibleSections, visibleRows])
 
   const projects = useMemo(() => {
     const map = new Map<string, { cwd: string; name: string; host: string; count: number }>()
@@ -478,7 +662,12 @@ export function T3Sidebar({
 
   const openRow = (row: T3SidebarRow): void => {
     if (row.contextId !== undefined) {
-      void store.activateContext(row.contextId, row.id)
+      const section = sections.find(
+        (item): item is Extract<typeof item, { kind: 'context' }> =>
+          item.kind === 'context' && item.context.id === row.contextId,
+      )
+      const hasLiveSession = Boolean(section?.rows.some(item => item.id === row.id))
+      void (hasLiveSession ? store.activateContext(row.contextId, row.id) : store.activateContext(row.contextId))
       return
     }
     void store.openSession(row.id)
@@ -502,8 +691,13 @@ export function T3Sidebar({
     const snoozeOpen = snoozeMenuId === row.id
     const rowBranch = row.branch || (row.contextId === undefined && row.cwd && row.cwd === snap.cwd ? snap.branch : '')
     const rowProvider: AgentBrandProvider = row.provider ?? (row.current ? activeProvider : 'xerxes')
+    const rowHost = row.host || (row.contextId === undefined ? currentHost : '')
+    const showHost = Boolean(rowHost && (rowHost !== THIS_MAC || hasMultipleHosts))
     const displayAge = row.current && !row.age && tone !== 'working' ? 'now' : row.age
-    const liveCurrentAge = tone === 'working' && row.current && snap.turnActive
+    const effectiveTurnStartedAt = tone === 'working'
+      ? (row.current && snap.turnActive && snap.turnStartedAt != null ? snap.turnStartedAt : row.turnStartedAt)
+      : undefined
+    const liveWorkingAge = tone === 'working' && (effectiveTurnStartedAt != null || (row.current && snap.turnActive))
 
     if (variant === 'settled') {
       return (
@@ -540,14 +734,16 @@ export function T3Sidebar({
     return (
       <div
         key={row.id}
-        className={`t3-thread-wrap${isNested ? ' t3-thread-wrap--nested' : ''}${row.current ? ' is-current' : ''}${snoozeOpen ? ' has-menu' : ''}`}
+        className={`t3-thread-wrap${isNested ? ' t3-thread-wrap--nested' : ''}${row.current ? ' is-current' : ''}${row.offline ? ' is-offline' : ''}${snoozeOpen ? ' has-menu' : ''}`}
         data-thread-id={row.id}
+        data-thread-status={row.offline && tone === 'idle' ? 'offline' : tone}
+        data-thread-provider={rowProvider}
       >
         <button
           type="button"
           className={`sess t3-thread${isNested ? ' t3-thread--nested' : ''}${showNestedSubline ? ' t3-thread--nested-rich' : ''}${row.current ? ' is-current' : ''}`}
           aria-haspopup={row.contextId === undefined ? 'menu' : undefined}
-          title={row.opensWindow ? 'Open this session while the current task continues' : `${projectLabel} · ${title}`}
+          title={row.opensWindow ? 'Open this session while the current task continues' : `${projectLabel}${showHost ? ` · ${rowHost}` : ''} · ${title}`}
           onClick={() => openRow(row)}
           onKeyDown={event => {
             if (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)) {
@@ -571,17 +767,28 @@ export function T3Sidebar({
                   {tone === 'working' ? (
                     <span className="t3-thread__status" data-status="working">
                       <span>acting</span>
-                      {liveCurrentAge
-                        ? <ElapsedClock active since={snap.turnStartedAt} baseSeconds={snap.turnSeconds} format={elapsedOf} className="sess__age" />
-                        : row.age && <span className="sess__age">{row.age}</span>}
+                      {liveWorkingAge
+                        ? <ElapsedClock active since={effectiveTurnStartedAt} baseSeconds={row.current ? snap.turnSeconds : 0} format={elapsedOf} className="sess__age" />
+                        : displayAge && <span className="sess__age">{displayAge}</span>}
                     </span>
                   ) : tone === 'failed' ? (
                     <span className="t3-thread__status" data-status="failed">
                       <span>failed</span>
+                      {displayAge && <span className="sess__age">{displayAge}</span>}
+                    </span>
+                  ) : row.offline ? (
+                    <span className="t3-thread__status" data-status="offline">
+                      <span>offline</span>
+                      {displayAge && <span className="sess__age">{displayAge}</span>}
                     </span>
                   ) : displayAge ? (
                     <span className="sess__age t3-thread__age">{displayAge}</span>
                   ) : null}
+                  {!showNestedSubline && (
+                    <span className="t3-thread__provider t3-thread__provider--inline" aria-hidden="true">
+                      <RuntimeBrandIcon provider={rowProvider} size={12} />
+                    </span>
+                  )}
                 </span>
               </div>
               {showNestedSubline && (
@@ -598,98 +805,105 @@ export function T3Sidebar({
               <div className="t3-thread__meta">
                 <ProjectMonogram name={projectLabel} seed={row.cwd} size={14} />
                 <span className="t3-thread__project">{projectLabel}</span>
-                {row.host && row.host !== THIS_MAC && <span className="t3-thread__host">· {row.host}</span>}
+                {showHost && <span className="t3-thread__host">· {rowHost}</span>}
                 <span className="t3-thread__spacer" />
                 <span className="t3-thread__right">
                   {tone === 'working' ? (
                     <span className="t3-thread__status" data-status="working">
                       <span className="sess__dot" data-status="working" />
                       <span>acting</span>
-                      {liveCurrentAge
-                        ? <ElapsedClock active since={snap.turnStartedAt} baseSeconds={snap.turnSeconds} format={elapsedOf} className="sess__age" />
-                        : row.age && <span className="sess__age">{row.age}</span>}
+                      {liveWorkingAge
+                        ? <ElapsedClock active since={effectiveTurnStartedAt} baseSeconds={row.current ? snap.turnSeconds : 0} format={elapsedOf} className="sess__age" />
+                        : displayAge && <span className="sess__age">{displayAge}</span>}
                     </span>
                   ) : tone === 'failed' ? (
                     <span className="t3-thread__status" data-status="failed">
                       <span className="sess__dot" data-status="failed" />
                       <span>failed</span>
+                      {displayAge && <span className="sess__age">{displayAge}</span>}
                     </span>
                   ) : variant === 'snoozed' && wakeAt ? (
                     <span className="t3-thread__snooze-badge">
                       <T3Icon name="alarmClock" size={11} />
                       <span>{formatSnoozeRemaining(wakeAt, now)}</span>
                     </span>
-                  ) : displayAge ? (
-                    <span className="sess__age t3-thread__age">{displayAge}</span>
-                  ) : null}
+                  ) : row.offline ? (
+                    <span className="t3-thread__status" data-status="offline">
+                      <span className="sess__dot" data-status="offline" />
+                      <span>offline</span>
+                      {displayAge && <span className="sess__age">{displayAge}</span>}
+                    </span>
+                  ) : (
+                    <span className="t3-thread__status" data-status="idle">
+                      <span className="sess__dot" data-status="idle" />
+                      <span>idle</span>
+                      {displayAge && <span className="sess__age">{displayAge}</span>}
+                    </span>
+                  )}
                 </span>
               </div>
               <div className="t3-thread__title-row">
                 <span className="sess__t t3-thread__title">{title}</span>
               </div>
-              {(rowBranch || row.current) && (
-                <div className="t3-thread__sub">
-                  <span className="t3-thread__branch">{rowBranch || ''}</span>
-                  <span className="t3-thread__provider" aria-hidden="true">
-                    <RuntimeBrandIcon provider={rowProvider} size={13} />
-                  </span>
-                </div>
-              )}
+              <div className="t3-thread__sub">
+                <span className="t3-thread__branch">{rowBranch || ''}</span>
+                <span className="t3-thread__provider" aria-hidden="true">
+                  <RuntimeBrandIcon provider={rowProvider} size={13} />
+                </span>
+              </div>
             </div>
           )}
         </button>
 
-        {row.contextId === undefined && (
-          <div className="t3-thread__hover-actions" aria-label="Thread quick actions">
-            {variant === 'snoozed' ? (
+        <div className="t3-thread__hover-actions" aria-label="Thread quick actions">
+          {variant === 'snoozed' ? (
+            <button
+              type="button"
+              className="t3-thread__act"
+              title="Wake thread now"
+              aria-label={`Wake ${title}`}
+              onClick={event => { event.stopPropagation(); onSnooze(row.id, title, null) }}
+            >
+              <T3Icon name="undo" size={13} />
+            </button>
+          ) : (
+            <>
               <button
                 type="button"
-                className="t3-thread__act"
-                title="Wake thread now"
-                aria-label={`Wake ${title}`}
-                onClick={event => { event.stopPropagation(); onSnooze(row.id, title, null) }}
+                className={`t3-thread__act${pinned ? ' is-active' : ''}`}
+                title={pinned ? 'Unpin thread' : 'Pin thread'}
+                aria-label={pinned ? `Unpin ${title}` : `Pin ${title}`}
+                onClick={event => { event.stopPropagation(); onTogglePin(row.id, title) }}
               >
-                <T3Icon name="undo" size={13} />
+                <T3Icon name={pinned ? 'pinOff' : 'pin'} size={13} />
               </button>
-            ) : (
-              <>
-                <button
-                  type="button"
-                  className={`t3-thread__act${pinned ? ' is-active' : ''}`}
-                  title={pinned ? 'Unpin thread' : 'Pin thread'}
-                  aria-label={pinned ? `Unpin ${title}` : `Pin ${title}`}
-                  onClick={event => { event.stopPropagation(); onTogglePin(row.id, title) }}
-                >
-                  <T3Icon name={pinned ? 'pinOff' : 'pin'} size={13} />
-                </button>
-                <button
-                  type="button"
-                  className={`t3-thread__act${snoozed || snoozeOpen ? ' is-active' : ''}`}
-                  title="Snooze thread"
-                  aria-label={`Snooze ${title}`}
-                  aria-haspopup="menu"
-                  aria-expanded={snoozeOpen}
-                  onClick={event => {
-                    event.stopPropagation()
-                    snoozeTriggerRef.current = event.currentTarget
-                    setSnoozeMenuId(current => (current === row.id ? null : row.id))
-                  }}
-                >
-                  <T3Icon name="alarmClock" size={13} />
-                </button>
-                <button
-                  type="button"
-                  className="t3-thread__act t3-thread__act--settle"
-                  title="Settle thread"
-                  aria-label={`Settle ${title}`}
-                  onClick={event => { event.stopPropagation(); onSettle(row.id, title, true) }}
-                >
-                  <T3Icon name="check" size={13} />
-                </button>
-              </>
-            )}
-          </div>
-        )}
+              <button
+                type="button"
+                className={`t3-thread__act${snoozed || snoozeOpen ? ' is-active' : ''}`}
+                title="Snooze thread"
+                aria-label={`Snooze ${title}`}
+                aria-haspopup="menu"
+                aria-expanded={snoozeOpen}
+                onClick={event => {
+                  event.stopPropagation()
+                  snoozeTriggerRef.current = event.currentTarget
+                  setSnoozeMenuId(current => (current === row.id ? null : row.id))
+                }}
+              >
+                <T3Icon name="alarmClock" size={13} />
+              </button>
+              <button
+                type="button"
+                className="t3-thread__act t3-thread__act--settle"
+                title="Settle thread"
+                aria-label={`Settle ${title}`}
+                onClick={event => { event.stopPropagation(); onSettle(row.id, title, true) }}
+              >
+                <T3Icon name="check" size={13} />
+              </button>
+            </>
+          )}
+        </div>
 
         {snoozeOpen && (
           <PickerLayer>
@@ -1029,18 +1243,27 @@ export function T3Sidebar({
                           if (!running && isSnoozedActive(inbox.snoozed, row.id, now)) return false
                           return true
                         })
-                        .map(row => ({
-                          id: row.id,
-                          key: row.id,
-                          title: row.title,
-                          status: row.status,
-                          age: '',
-                          current: false,
-                          turns: 0,
-                          cwd: row.cwd || section.cwd,
-                          host: section.host,
-                          contextId: section.context.id,
-                        }))
+                        .map(row => {
+                          const parsedProvider = brandProviderOf(row.provider)
+                          const offline = section.context.availability === 'offline' || section.context.availability === 'no-runtime'
+                          return enrichRow({
+                            id: row.id,
+                            key: row.id,
+                            title: row.title,
+                            status: row.status,
+                            age: row.activeAt !== undefined ? ageOf(row.activeAt) : '',
+                            ...(row.turnStartedAt !== undefined ? { turnStartedAt: row.turnStartedAt } : {}),
+                            ...(row.activeAt !== undefined ? { activeAt: row.activeAt } : {}),
+                            ...(parsedProvider ? { provider: parsedProvider } : {}),
+                            ...(row.branch ? { branch: row.branch } : {}),
+                            ...(offline ? { offline: true } : {}),
+                            current: false,
+                            turns: 0,
+                            cwd: row.cwd || section.cwd,
+                            host: section.host,
+                            contextId: section.context.id,
+                          })
+                        })
                     : section.rows
                         .filter(row => {
                           const running = row.status === 'working' || row.status === 'running'
@@ -1049,21 +1272,28 @@ export function T3Sidebar({
                           if (!running && isSnoozedActive(inbox.snoozed, row.id, now)) return false
                           return true
                         })
-                        .map(row => ({
-                          id: row.id,
-                          key: row.key,
-                          title: row.title,
-                          ...(snap.snippets[row.id] !== undefined ? { snippet: snap.snippets[row.id] } : {}),
-                          status: row.status,
-                          age: row.age,
-                          current: row.current,
-                          turns: row.turns,
-                          cwd: row.cwd || section.cwd,
-                          ...(row.cwd === snap.cwd && snap.branch ? { branch: snap.branch } : {}),
-                          provider: row.current ? activeProvider : 'xerxes',
-                          host: section.host,
-                          opensWindow: snap.turnActive && row.id !== snap.currentId,
-                        }))
+                        .map(row => {
+                          const parsedProvider = row.current ? activeProvider : brandProviderOf(row.provider)
+                          const activeAt = row.activeAt ?? snap.sessionActivity?.[row.id]
+                          const branch = row.branch || (row.cwd === snap.cwd ? snap.branch : '')
+                          return enrichRow({
+                            id: row.id,
+                            key: row.key,
+                            title: row.title,
+                            ...(snap.snippets[row.id] !== undefined ? { snippet: snap.snippets[row.id] } : {}),
+                            status: row.status,
+                            age: row.age || (activeAt !== undefined ? ageOf(activeAt) : ''),
+                            ...(row.turnStartedAt !== undefined ? { turnStartedAt: row.turnStartedAt } : {}),
+                            ...(activeAt !== undefined ? { activeAt } : {}),
+                            current: row.current,
+                            turns: row.turns,
+                            cwd: row.cwd || section.cwd,
+                            ...(branch ? { branch } : {}),
+                            ...(parsedProvider ? { provider: parsedProvider } : {}),
+                            host: section.host,
+                            opensWindow: snap.turnActive && row.id !== snap.currentId,
+                          })
+                        })
                   return { section, folderRows }
                 })
                 .filter(entry => !needle || entry.folderRows.length > 0)

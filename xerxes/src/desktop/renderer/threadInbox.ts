@@ -11,6 +11,23 @@ import { useCallback, useEffect, useState, useSyncExternalStore } from 'react'
 
 export const THREAD_INBOX_KEY = 'xerxes.desktop.threadInbox.v2'
 const LEGACY_THREAD_INBOX_KEY = 'xerxes.desktop.threadInbox.v1'
+export const THREAD_META_KEY = 'xerxes.desktop.threadMeta.v1'
+const MAX_THREAD_META_ENTRIES = 300
+
+export interface ThreadMetaEntry {
+  readonly id: string
+  readonly title?: string
+  readonly cwd?: string
+  readonly host?: string
+  readonly provider?: string
+  readonly branch?: string
+  readonly status?: string
+  readonly turnStartedAt?: number
+  readonly activeAt?: number
+  readonly updatedAt: number
+}
+
+export type ThreadMetaMap = Readonly<Record<string, ThreadMetaEntry>>
 
 export type SidebarViewMode = 'inbox' | 'folders'
 
@@ -186,6 +203,189 @@ export function subscribeThreadInbox(listener: () => void): () => void {
 
 export function resetThreadInboxCacheForTests(): void {
   cachedState = null
+  cachedMeta = null
+}
+
+// ── Persistent thread metadata cache (runtime logo, elapsed clock, host, offline pins) ──
+
+let cachedMeta: ThreadMetaMap | null = null
+const metaListeners = new Set<() => void>()
+
+export function parseThreadMetaMap(value: unknown): ThreadMetaMap {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  const out: Record<string, ThreadMetaEntry> = {}
+  let count = 0
+  for (const [id, raw] of Object.entries(value as Record<string, unknown>)) {
+    if (!id || id.length > 256 || !raw || typeof raw !== 'object' || Array.isArray(raw)) continue
+    const rec = raw as Record<string, unknown>
+    const strField = (v: unknown, max = 512): string | undefined =>
+      typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : undefined
+    const numField = (v: unknown): number | undefined =>
+      typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined
+    const title = strField(rec.title, 512)
+    const cwd = strField(rec.cwd, 4096)
+    const host = strField(rec.host, 200)
+    const provider = strField(rec.provider, 64)
+    const branch = strField(rec.branch, 200)
+    const status = strField(rec.status, 32)
+    const turnStartedAt = numField(rec.turnStartedAt)
+    const activeAt = numField(rec.activeAt)
+    const updatedAt = numField(rec.updatedAt) ?? Date.now()
+    out[id] = {
+      id,
+      ...(title ? { title } : {}),
+      ...(cwd ? { cwd } : {}),
+      ...(host ? { host } : {}),
+      ...(provider ? { provider } : {}),
+      ...(branch ? { branch } : {}),
+      ...(status ? { status } : {}),
+      ...(turnStartedAt !== undefined ? { turnStartedAt } : {}),
+      ...(activeAt !== undefined ? { activeAt } : {}),
+      updatedAt,
+    }
+    count += 1
+    if (count >= MAX_THREAD_META_ENTRIES) break
+  }
+  return out
+}
+
+export function loadThreadMetaMap(storage: StorageLike | undefined = defaultStorage()): ThreadMetaMap {
+  try {
+    const raw = storage?.getItem(THREAD_META_KEY)
+    return raw ? parseThreadMetaMap(JSON.parse(raw)) : {}
+  } catch {
+    return {}
+  }
+}
+
+export function saveThreadMetaMap(map: ThreadMetaMap, storage: StorageLike | undefined = defaultStorage()): void {
+  try {
+    storage?.setItem(THREAD_META_KEY, JSON.stringify(map))
+  } catch {
+    /* In-memory cache stays active when storage is unavailable. */
+  }
+}
+
+function getThreadMeta(): ThreadMetaMap {
+  if (!cachedMeta) cachedMeta = loadThreadMetaMap()
+  return cachedMeta
+}
+
+function emitMeta(): void {
+  for (const listener of metaListeners) listener()
+}
+
+export function subscribeThreadMeta(listener: () => void): () => void {
+  metaListeners.add(listener)
+  return () => {
+    metaListeners.delete(listener)
+  }
+}
+
+export interface ThreadMetaObservation {
+  readonly id: string
+  readonly title?: string
+  readonly cwd?: string
+  readonly host?: string
+  readonly provider?: string
+  /** True when `provider` is authoritative (e.g. active session or explicit wire provider). */
+  readonly authoritativeProvider?: boolean
+  readonly branch?: string
+  readonly status?: string
+  readonly turnStartedAt?: number
+  readonly activeAt?: number
+}
+
+/**
+ * Merge newly observed thread metadata into the persisted cache without
+ * clobbering remembered runtime providers/branches on incomplete remote probes.
+ */
+export function recordThreadMetaObservations(
+  observations: readonly ThreadMetaObservation[],
+  now: number = Date.now(),
+  storage: StorageLike | undefined = defaultStorage(),
+): ThreadMetaMap {
+  if (observations.length === 0) return getThreadMeta()
+  const current = getThreadMeta()
+  let next: Record<string, ThreadMetaEntry> | null = null
+  for (const obs of observations) {
+    if (!obs.id) continue
+    const prev = (next ?? current)[obs.id]
+    const working = obs.status === 'working' || obs.status === 'running'
+    const title = obs.title && !obs.title.startsWith('#') ? obs.title : (prev?.title ?? obs.title)
+    const cwd = obs.cwd || prev?.cwd
+    const host = obs.host || prev?.host
+    const provider = obs.authoritativeProvider && obs.provider
+      ? obs.provider
+      : (obs.provider && obs.provider !== 'xerxes' ? obs.provider : (prev?.provider ?? obs.provider))
+    const branch = obs.branch || prev?.branch
+    const status = obs.status ?? prev?.status
+    const turnStartedAt = working
+      ? (obs.turnStartedAt ?? prev?.turnStartedAt ?? obs.activeAt ?? now)
+      : undefined
+    const activeAt = obs.activeAt !== undefined
+      ? Math.max(prev?.activeAt ?? 0, obs.activeAt)
+      : prev?.activeAt
+    const candidate: ThreadMetaEntry = {
+      id: obs.id,
+      ...(title ? { title } : {}),
+      ...(cwd ? { cwd } : {}),
+      ...(host ? { host } : {}),
+      ...(provider ? { provider } : {}),
+      ...(branch ? { branch } : {}),
+      ...(status ? { status } : {}),
+      ...(turnStartedAt !== undefined ? { turnStartedAt } : {}),
+      ...(activeAt !== undefined ? { activeAt } : {}),
+      updatedAt: prev?.updatedAt ?? now,
+    }
+    const unchanged =
+      prev !== undefined
+      && prev.title === candidate.title
+      && prev.cwd === candidate.cwd
+      && prev.host === candidate.host
+      && prev.provider === candidate.provider
+      && prev.branch === candidate.branch
+      && prev.status === candidate.status
+      && prev.turnStartedAt === candidate.turnStartedAt
+      && prev.activeAt === candidate.activeAt
+    if (unchanged) continue
+    if (!next) next = { ...current }
+    next[obs.id] = { ...candidate, updatedAt: now }
+  }
+  if (!next) return current
+  const keys = Object.keys(next)
+  if (keys.length > MAX_THREAD_META_ENTRIES) {
+    const pinnedSet = new Set(getState().pinnedIds)
+    const sorted = keys.sort((a, b) => {
+      const pa = pinnedSet.has(a) ? 1 : 0
+      const pb = pinnedSet.has(b) ? 1 : 0
+      if (pa !== pb) return pb - pa
+      return (next![b]!.updatedAt) - (next![a]!.updatedAt)
+    })
+    const trimmed: Record<string, ThreadMetaEntry> = {}
+    for (const key of sorted.slice(0, MAX_THREAD_META_ENTRIES)) trimmed[key] = next[key]!
+    next = trimmed
+  }
+  cachedMeta = next
+  saveThreadMetaMap(next, storage)
+  emitMeta()
+  return next
+}
+
+export function useThreadMetaCache(): ThreadMetaMap {
+  const meta = useSyncExternalStore(subscribeThreadMeta, getThreadMeta, getThreadMeta)
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const onStorage = (event: StorageEvent): void => {
+      if (event.key === null || event.key === THREAD_META_KEY) {
+        cachedMeta = loadThreadMetaMap()
+        emitMeta()
+      }
+    }
+    window.addEventListener('storage', onStorage)
+    return () => window.removeEventListener('storage', onStorage)
+  }, [])
+  return meta
 }
 
 // ── Pure inbox mutations ──

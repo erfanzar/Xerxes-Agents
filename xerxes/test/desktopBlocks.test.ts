@@ -561,3 +561,36 @@ test('blocksFromStoredMessages preserves tool diffs, locations, title, kind, and
     })
   }
 })
+
+test('blocksFromStoredMessages places tool executions above final assistant content on flat single-message turns', () => {
+  const stringTurn = blocksFromStoredMessages(
+    [
+      { role: 'user', content: 'Deploy slice' },
+      {
+        role: 'assistant',
+        content: 'Deployment Summary: ready.',
+        thinking: 'Verifying slice state.',
+        tool_calls: [{ id: 'tc-1', type: 'function', function: { name: 'exec_command', arguments: '{"cmd":"eray status"}' } }],
+      },
+      { role: 'tool', tool_call_id: 'tc-1', content: 'ok' },
+    ],
+    { executions: [{ toolCallId: 'tc-1', name: 'exec_command', inputs: { cmd: 'eray status' }, result: 'ok', permitted: true, durationMs: 80 }] },
+  )
+  expect(stringTurn.map(block => block.kind)).toEqual(['user', 'thinking', 'tools', 'agent'])
+  expect(stringTurn.at(-1)).toMatchObject({ kind: 'agent', text: 'Deployment Summary: ready.' })
+
+  const arrayTurn = blocksFromStoredMessages(
+    [
+      { role: 'user', content: 'Check slice' },
+      {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'All hosts healthy.' }],
+        tool_calls: [{ id: 'tc-2', type: 'function', function: { name: 'exec_command', arguments: '{"cmd":"ping"}' } }],
+      },
+      { role: 'tool', tool_call_id: 'tc-2', content: 'pong' },
+    ],
+    { executions: [{ toolCallId: 'tc-2', name: 'exec_command', inputs: { cmd: 'ping' }, result: 'pong', permitted: true, durationMs: 25 }] },
+  )
+  expect(arrayTurn.map(block => block.kind)).toEqual(['user', 'tools', 'agent'])
+  expect(arrayTurn.at(-1)).toMatchObject({ kind: 'agent', text: 'All hosts healthy.' })
+})

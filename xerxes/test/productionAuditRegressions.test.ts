@@ -809,6 +809,90 @@ describe('Production audit regressions — Desktop Store', () => {
       expect(snap.turnActive).toBe(false)
     })
   })
+
+  test('ageOf handles both epoch seconds and epoch ms; applyInflightTurn preserves chronological steer order and live tools; steerNow interrupts blocking Antigravity tools', async () => {
+    const { ageOf, applyInflightTurn } = await import('../src/desktop/renderer/store.js')
+    const { BlockBuilder } = await import('../src/desktop/renderer/blocks.js')
+
+    const tenMinutesAgoMs = Date.now() - 10 * 60_000
+    expect(ageOf(tenMinutesAgoMs)).toBe('10m')
+    expect(ageOf(Math.floor(tenMinutesAgoMs / 1000))).toBe('10m')
+
+    // Chronological inflight messages keep an answered steer BEFORE the assistant's response and keep running tools `working`.
+    const builder = new BlockBuilder()
+    applyInflightTurn(builder, {
+      user: 'start distillation',
+      started_at: Math.floor(tenMinutesAgoMs / 1000),
+      messages: [
+        { role: 'user', content: 'start distillation' },
+        { role: 'assistant', content: 'Probing B=32.' },
+        { role: 'user', content: 'also turn on wandb' },
+        {
+          role: 'assistant',
+          content: 'W&B authenticated cleanly.',
+          tool_calls: [{ id: 'tc-live', type: 'function', function: { name: 'exec_command', arguments: '{"cmd":"gcloud ssh"}' } }],
+        },
+      ],
+      executions: [],
+    })
+    const hydrated = builder.snapshot(true)
+    expect(hydrated.map(b => b.kind)).toEqual(['user', 'agent', 'user', 'tools', 'agent'])
+    expect(hydrated[2]).toMatchObject({ kind: 'user', text: 'also turn on wandb' })
+    expect(hydrated[3]).toMatchObject({ kind: 'tools', running: true, items: [{ id: 'tc-live', state: 'working' }] })
+    expect(hydrated[4]).toMatchObject({ kind: 'agent', text: 'W&B authenticated cleanly.' })
+
+    // On Antigravity, steerNow uses live_steer when thinking/streaming, but interrupts via turn.cancel when a tool is actively blocking.
+    const bridge = makeStoreBridge()
+    bridge.respondWith(method => {
+      if (method === 'initialize') {
+        return {
+          ok: true,
+          session_id: 's-agy',
+          cwd: '/repo',
+          model: 'gemini-4-neon',
+          connection_lease_supported: true,
+          session: {
+            id: 's-agy',
+            key: 'k-agy',
+            cwd: '/repo',
+            status: 'idle',
+            messages: [],
+            history: { actions: [], before: null, has_more: false },
+            acp_binding: {
+              session_id: 's-agy',
+              agent_id: 'antigravity',
+              name: 'Antigravity',
+              provider: 'antigravity',
+              transport: 'acp',
+              cwd: '/repo',
+              connected: true,
+            },
+          },
+        }
+      }
+      if (method === 'turn.steer') return { ok: true, disposition: 'live_steer' }
+      if (method === 'turn.cancel') {
+        setTimeout(() => bridge.push('turn_end', { session_id: 's-agy', cancelled: true }), 5)
+        return { ok: true }
+      }
+      return { ok: true }
+    })
+    await withStoreWindow(bridge, async () => {
+      const store = new Store()
+      store.start(bridge as never)
+      await Bun.sleep(20)
+      bridge.push('turn_begin', { session_id: 's-agy', text: 'run training' })
+      bridge.push('tool_call', { session_id: 's-agy', id: 'tc-block', name: 'run_command', arguments: '{"cmd":"gcloud ssh"}' })
+      bridge.calls.length = 0
+
+      // Blocking tool is actively running -> steerNow must cancel + submit instead of passive live_steer.
+      const interrupted = await store.steerNow('is it reporting to wandb ?')
+      expect(interrupted).toBe(true)
+      expect(bridge.calls.some(c => c.method === 'turn.cancel' && c.params.drop_pending_steers === true)).toBe(true)
+      expect(bridge.calls.some(c => c.method === 'turn.submit' && c.params.text === 'is it reporting to wandb ?')).toBe(true)
+      expect(bridge.calls.some(c => c.method === 'turn.steer' && c.params.live === true)).toBe(false)
+    })
+  })
 })
 
 describe('SSH & remote performance regressions — wire history budget & direct git HEAD', () => {
@@ -923,6 +1007,27 @@ describe('SSH & remote performance regressions — wire history budget & direct 
       const olderPage = olderResp.history as { actions: Array<{ messages: Array<{ role?: string; content?: string }> }> }
       expect(olderPage.actions.length).toBeGreaterThan(0)
       expect(olderPage.actions.flatMap(a => a.messages).some(m => m.content === 'turn 0')).toBe(true)
+
+      // 3. Saved transcripts preserve lean ACP runtime provider metadata for fast session.list without bulky mode/model lists.
+      session.metadata.acp_binding = {
+        session_id: session.id,
+        agent_id: 'antigravity',
+        name: 'Antigravity',
+        provider: 'antigravity',
+        transport: 'acp',
+        cwd: repoDir,
+        connected: false,
+        available_models: Array.from({ length: 40 }, (_, i) => ({ id: `m-${i}`, name: `Model ${i}` })),
+        available_modes: [{ id: 'code', name: 'Code' }],
+      }
+      await runtime.flushSessions()
+      const listedResp = await callRpc('session.list', { kind: 'main', scope: 'global', limit: 20 })
+      const listedRows = (listedResp.sessions as Array<Record<string, unknown>>) ?? []
+      const listedHeavy = listedRows.find(row => row.id === sessionId)
+      expect(listedHeavy).toBeDefined()
+      expect(listedHeavy?.acp_provider).toBe('antigravity')
+      expect(listedHeavy?.acp_agent_id).toBe('antigravity')
+      expect(listedHeavy?.available_models).toBeUndefined()
     } finally {
       socket?.destroy()
       await server.stop()

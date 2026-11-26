@@ -8,12 +8,12 @@ import { Fragment, createContext, memo, useCallback, useContext, useLayoutEffect
 import { CommandPalette, PickerLayer, DelegationMenu, ModelMenu, ModelPicker, ReasoningPicker, SettingsModal, bareModelName } from './Overlays.js'
 import { SessionSearch } from './SearchPanel.js'
 import { captureHistoryScrollAnchor, restoreHistoryScrollAnchor, useTranscriptScroll, type HistoryScrollAnchor } from './transcriptScroll.js'
-import { resolveExternalAcpCatalog, showsImmortalsForSession, store, type CompletionHintItem, type ComposerImage, type Snapshot, isPlanReview } from './store.js'
+import { ageOf, resolveExternalAcpCatalog, showsImmortalsForSession, store, type CompletionHintItem, type ComposerImage, type Snapshot, isPlanReview } from './store.js'
 import { connectionFailureKind } from './connectionFailure.js'
 import { failureView } from './turnFailure.js'
 import type { AgentMember, ApprovalResponse, Block } from './types.js'
 import { applyCompletion, wantsHints } from './hints.js'
-import { SIDEBAR_SECTION_ROWS, groupByWorkspace, hostOfScope, limitRows, loadCollapsedSections, saveCollapsedSections, sidebarOrder, sidebarSections } from './workspaceGroups.js'
+import { SIDEBAR_SECTION_ROWS, THIS_MAC, groupByWorkspace, hostOfScope, limitRows, loadCollapsedSections, saveCollapsedSections, sidebarOrder, sidebarSections } from './workspaceGroups.js'
 import { CopyButton } from './CopyButton.js'
 import { currentSessionDensity, subscribeSessionDensity } from './displayPrefs.js'
 import { ChangesTab, LogTab, PlanTab } from './Workspaces.js'
@@ -85,7 +85,7 @@ import {
 import { elapsedOf } from './duration.js'
 import { swarmMemberCounts } from './swarmState.js'
 import type { ScmStatus } from '../../workspace/gitScm.js'
-import { T3Sidebar, type T3SidebarRow } from './T3Sidebar.js'
+import { T3Sidebar, brandProviderOf, type T3SidebarRow } from './T3Sidebar.js'
 import { ThreadDetailsCard } from './ThreadDetailsCard.js'
 import { TerminalDrawer, loadTerminalDrawerHeight } from './TerminalDrawer.js'
 import { RightPanelLauncher } from './RightPanelLauncher.js'
@@ -1395,6 +1395,13 @@ export function Sidebar({ snap, page }: { snap: Snapshot; page: DesktopPageName 
     || shownTitle(row).toLowerCase().includes(needle)
     || row.title.toLowerCase().includes(needle)
     || row.id.includes(needle)
+  const activeExternal = isExternalAcpBinding(snap.acpBinding)
+    ? snap.acpBinding
+    : snap.savedAcpBinding && snap.savedAcpBinding.transport !== 'native'
+      ? snap.savedAcpBinding
+      : null
+  const activeProvider = activeExternal ? activeExternal.provider : ('xerxes' as const)
+  const currentHost = snap.contextHost ?? hostOfScope(snap.storageScope) ?? THIS_MAC
   // Mockup 07: the CURRENT task stays in its workspace group, marked and
   // carrying live status — derived from the snapshot so it updates the
   // instant a turn starts/ends instead of lagging behind list refreshes.
@@ -1407,6 +1414,14 @@ export function Sidebar({ snap, page }: { snap: Snapshot; page: DesktopPageName 
         title: snap.currentTitle || 'New task',
         status: snap.turnActive ? 'working' : snap.turnFailed ? 'failed' : 'idle',
         age: snap.turnActive ? elapsedOf(snap.turnSeconds, true) : '',
+        ...(snap.turnActive && snap.turnStartedAt !== null && snap.turnStartedAt !== undefined
+          ? { turnStartedAt: snap.turnStartedAt }
+          : {}),
+        ...(snap.sessionActivity?.[snap.currentId] !== undefined
+          ? { activeAt: snap.sessionActivity[snap.currentId]! }
+          : {}),
+        provider: activeProvider,
+        ...(snap.branch ? { branch: snap.branch } : {}),
         current: true,
         kind: 'main',
         turns: snap.turnCount,
@@ -1427,51 +1442,62 @@ export function Sidebar({ snap, page }: { snap: Snapshot; page: DesktopPageName 
   ], snap.sessionActivity ?? {}).filter(match)
   const groups = groupByWorkspace(rows, '', snap.workspaceDirectories)
   // One list for every host and folder, in an order no click changes.
-  const sections = sidebarSections(groups, snap.contexts ?? [], snap.contextHost ?? hostOfScope(snap.storageScope))
+  const sections = sidebarSections(groups, snap.contexts ?? [], currentHost)
   const online = snap.connection === 'online'
   const vibes = useVibesStyle()
   const fallbackInbox = useThreadInbox()
   const inbox = chrome.inbox ?? fallbackInbox
 
   if (vibes) {
-    const activeExternal = isExternalAcpBinding(snap.acpBinding)
-      ? snap.acpBinding
-      : snap.savedAcpBinding && snap.savedAcpBinding.transport !== 'native'
-        ? snap.savedAcpBinding
-        : null
-    const activeProvider = activeExternal ? activeExternal.provider : 'xerxes' as const
     const t3Rows: T3SidebarRow[] = [
-      ...rows.map(row => ({
-        id: row.id,
-        key: row.key,
-        title: row.title,
-        ...(snap.snippets[row.id] !== undefined ? { snippet: snap.snippets[row.id] } : {}),
-        status: row.status,
-        age: row.age,
-        current: row.current,
-        turns: row.turns,
-        cwd: row.cwd || snap.cwd,
-        ...(row.cwd === snap.cwd && snap.branch ? { branch: snap.branch } : {}),
-        provider: row.current ? activeProvider : 'xerxes',
-        opensWindow: snap.turnActive && row.id !== snap.currentId,
-      })),
+      ...rows.map(row => {
+        const parsedProvider = row.current ? activeProvider : brandProviderOf(row.provider)
+        const activeAt = row.activeAt ?? snap.sessionActivity?.[row.id]
+        const branch = row.branch || (row.cwd === snap.cwd ? snap.branch : '')
+        return {
+          id: row.id,
+          key: row.key,
+          title: row.title,
+          ...(snap.snippets[row.id] !== undefined ? { snippet: snap.snippets[row.id] } : {}),
+          status: row.status,
+          age: row.age || (activeAt !== undefined ? ageOf(activeAt) : ''),
+          ...(row.turnStartedAt !== undefined ? { turnStartedAt: row.turnStartedAt } : {}),
+          ...(activeAt !== undefined ? { activeAt } : {}),
+          current: row.current,
+          turns: row.turns,
+          cwd: row.cwd || snap.cwd,
+          host: currentHost,
+          ...(branch ? { branch } : {}),
+          ...(parsedProvider ? { provider: parsedProvider } : {}),
+          opensWindow: snap.turnActive && row.id !== snap.currentId,
+        }
+      }),
       ...sections
         .filter((section): section is Extract<typeof section, { kind: 'context' }> => section.kind === 'context')
         .flatMap(section =>
           section.rows
             .filter(row => !needle || row.title.toLowerCase().includes(needle))
-            .map(row => ({
-              id: row.id,
-              key: row.id,
-              title: row.title,
-              status: row.status,
-              age: '',
-              current: false,
-              turns: 0,
-              cwd: row.cwd || section.cwd,
-              host: section.host,
-              contextId: section.context.id,
-            })),
+            .map(row => {
+              const parsedProvider = brandProviderOf(row.provider)
+              const offline = section.context.availability === 'offline' || section.context.availability === 'no-runtime'
+              return {
+                id: row.id,
+                key: row.id,
+                title: row.title,
+                status: row.status,
+                age: row.activeAt !== undefined ? ageOf(row.activeAt) : '',
+                ...(row.turnStartedAt !== undefined ? { turnStartedAt: row.turnStartedAt } : {}),
+                ...(row.activeAt !== undefined ? { activeAt: row.activeAt } : {}),
+                ...(parsedProvider ? { provider: parsedProvider } : {}),
+                ...(row.branch ? { branch: row.branch } : {}),
+                ...(offline ? { offline: true } : {}),
+                current: false,
+                turns: 0,
+                cwd: row.cwd || section.cwd,
+                host: section.host,
+                contextId: section.context.id,
+              }
+            }),
         ),
     ]
     return (
@@ -3933,11 +3959,12 @@ function Composer({ snap }: { snap: Snapshot }): ReactElement {
     ? /^(plan|planning)$/i.test(snap.acpBinding?.current_mode ?? '')
     : snap.planMode
   const ready = snap.connection === 'online' && !snap.compacting
+  const liveAntigravitySteer = Boolean(snap.acpBinding?.connected && snap.acpBinding.provider === 'antigravity')
   const placeholder =
     snap.connection !== 'online'
       ? 'Waiting for workspace runtime…'
       : snap.turnActive
-        ? 'Queue follow-up (⏎) or steer now (⌘⏎)'
+        ? (liveAntigravitySteer ? 'Steer live (⏎) or interrupt & send (⌘⏎)' : 'Queue follow-up (⏎) or steer now (⌘⏎)')
         : snap.compacting
           ? 'Compacting the conversation. You can send when it finishes.'
           : inPlanMode

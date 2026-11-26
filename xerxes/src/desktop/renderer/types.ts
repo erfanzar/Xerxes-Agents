@@ -288,6 +288,12 @@ export interface SessionRow {
   readonly age: string
   /** Epoch ms of the latest conversation message; the sidebar's sort key. */
   readonly activeAt?: number
+  /** Epoch ms when the active turn started (for live elapsed timers across all rows). */
+  readonly turnStartedAt?: number
+  /** Normalized runtime/ACP provider (`antigravity`, `claude-code`, `codex`, `acp`, `xerxes`). */
+  readonly provider?: string
+  /** Last known git branch for this session's workspace. */
+  readonly branch?: string
   readonly current: boolean
   readonly kind: 'main' | 'subagent'
   readonly turns: number

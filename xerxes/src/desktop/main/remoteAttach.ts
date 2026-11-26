@@ -38,11 +38,38 @@ const finish = (message, failure = false) => {
 };
 const timer = setTimeout(() => finish('Remote read-only probe timed out.', true), 8000);
 const request = (id, method, params) => socket.write(JSON.stringify({jsonrpc:'2.0', id, method, params:{...params, project_dir:projectDir}}) + '\\n');
+const cleanEpochMs = value => {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value > 1e11 ? Math.round(value) : Math.round(value * 1000);
+  if (typeof value === 'string' && value.trim()) { const ms = Date.parse(value); if (Number.isFinite(ms) && ms > 0) return ms; }
+  return undefined;
+};
+const cleanProvider = row => {
+  const b = (row.acp_binding && typeof row.acp_binding === 'object') ? row.acp_binding : (row.saved_acp_binding && typeof row.saved_acp_binding === 'object') ? row.saved_acp_binding : null;
+  if (b && String(b.transport || '').toLowerCase() === 'native') return undefined;
+  const raw = (b && (b.provider || b.agent_id)) || row.acp_provider || row.acp_agent_id || '';
+  if (typeof raw !== 'string') return undefined;
+  const clean = raw.trim().toLowerCase();
+  if (!clean || clean === 'xerxes' || !/^[a-z0-9._-]{1,64}$/.test(clean)) return undefined;
+  return clean;
+};
 const cleanSessions = value => (Array.isArray(value) ? value : []).slice(0, 200).flatMap(row => {
   if (!row || typeof row !== 'object' || (row.kind || row.session_kind || 'main') !== 'main') return [];
   const id = row.id || row.session_id;
   if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,256}$/.test(id) || typeof row.cwd !== 'string' || !row.cwd.startsWith('/') || row.cwd.length > 4096 || /[\\x00-\\x1f\\x7f]/.test(row.cwd)) return [];
-  return [{id, cwd:row.cwd, title:typeof row.title === 'string' ? row.title.replace(/[\\x00-\\x1f\\x7f]/g, ' ').slice(0,512) : '', status:row.active_turn_id || row.status === 'working' || row.status === 'acting' ? 'working' : row.status === 'failed' ? 'failed' : 'idle'}];
+  const provider = cleanProvider(row);
+  const turnStartedAt = cleanEpochMs((row.inflight && typeof row.inflight === 'object' ? row.inflight.started_at : undefined) ?? row.turn_started_at);
+  const activeAt = cleanEpochMs(row.updated_at ?? row.last_active);
+  const branch = typeof row.branch === 'string' && row.branch.trim() && row.branch.length <= 200 && !/[\\x00-\\x1f\\x7f]/.test(row.branch) ? row.branch.trim() : undefined;
+  return [{
+    id,
+    cwd:row.cwd,
+    title:typeof row.title === 'string' ? row.title.replace(/[\\x00-\\x1f\\x7f]/g, ' ').slice(0,512) : '',
+    status:row.active_turn_id || row.status === 'working' || row.status === 'acting' ? 'working' : row.status === 'failed' ? 'failed' : 'idle',
+    ...(provider ? { provider } : {}),
+    ...(turnStartedAt !== undefined ? { turnStartedAt } : {}),
+    ...(activeAt !== undefined ? { activeAt } : {}),
+    ...(branch ? { branch } : {}),
+  }];
 });
 socket.on('connect', () => request(1, 'runtime.status', {}));
 socket.on('error', error => {

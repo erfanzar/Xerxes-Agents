@@ -10,7 +10,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 
 import { FilesChangedCard, Shell, Sidebar } from '../src/desktop/renderer/App.js'
 import { T3ModelPicker, compactModelTriggerName, reasoningLevelLabel } from '../src/desktop/renderer/T3ModelPicker.js'
-import { T3Sidebar, groupSectionsByMachine } from '../src/desktop/renderer/T3Sidebar.js'
+import { T3Sidebar, brandProviderOf, groupSectionsByMachine } from '../src/desktop/renderer/T3Sidebar.js'
 import { localMachineLabel } from '../src/desktop/renderer/runModeView.js'
 import { ThreadDetailsCard } from '../src/desktop/renderer/ThreadDetailsCard.js'
 import { RightPanelLauncher, XERXES_SURFACES } from '../src/desktop/renderer/RightPanelLauncher.js'
@@ -46,6 +46,7 @@ import {
   monogramForProject,
   parseThreadInboxState,
   partitionInboxThreads,
+  recordThreadMetaObservations,
   resetThreadInboxCacheForTests,
   setSettledInState,
   setSnoozedInState,
@@ -731,5 +732,187 @@ describe('T3 Code Shell, Sidebar V2, Breadcrumb Header & Panels', () => {
     expect(vibesCss).toContain('.desktop-page .specialists>.studio-actions.agents-empty-actions{max-width:560px;margin:16px auto 0;')
     // Neo Supervisor dock has no leading + button, so its ❯ prompt aligns cleanly at 14px
     expect(neoCss).toContain('.composer-wrap.supervisor__dock>.composer-dock>.composer::before{padding-left:14px}')
+  })
+
+  test('T3Sidebar always shows runtime logo, live elapsed duration, working/idle/offline status, cached offline pins, and Inbox machine hosts across all machines', () => {
+    expect(brandProviderOf('antigravity')).toBe('antigravity')
+    expect(brandProviderOf('claude-code')).toBe('claude-code')
+    expect(brandProviderOf('codex')).toBe('codex')
+    expect(brandProviderOf('gemini-cli')).toBe('acp')
+    expect(brandProviderOf('xerxes')).toBe('xerxes')
+
+    const now = Date.now()
+    // Seed persistent thread metadata cache for an offline pinned remote session not present in live allRows.
+    recordThreadMetaObservations([
+      {
+        id: 'pin-offline-agy',
+        title: 'Update EasyDeL TPU Slice Serving (offline)',
+        cwd: '/home/erfan/easydel-src',
+        host: 'prism-v5p-1024_3',
+        provider: 'antigravity',
+        authoritativeProvider: true,
+        status: 'idle',
+        activeAt: now - 15 * 60_000,
+      },
+    ], now)
+
+    const snap = makeSnapshot({
+      cwd: '/home/erfan/easydel-src',
+      contextHost: 'prism-v5p-128_dev_1',
+      currentId: 'thr-active-ssh',
+      currentTitle: 'Transforming Qwen Into Loop Transformer',
+      turnActive: true,
+      turnStartedAt: now - 1871_000,
+      turnSeconds: 1871,
+      acpBinding: {
+        session_id: 'thr-active-ssh',
+        agent_id: 'antigravity',
+        name: 'Antigravity',
+        provider: 'antigravity',
+        transport: 'acp',
+        cwd: '/home/erfan/easydel-src',
+        connected: true,
+      },
+    })
+    const inbox = parseThreadInboxState({
+      viewMode: 'inbox',
+      pinnedIds: ['thr-active-ssh', 'pin-remote-working', 'pin-offline-agy'],
+    })
+
+    const html = renderToStaticMarkup(createElement(T3Sidebar, {
+      snap,
+      page: null,
+      sections: [],
+      allRows: [
+        {
+          id: 'thr-active-ssh',
+          key: 'thr-active-ssh',
+          title: 'Transforming Qwen Into Loop Transformer',
+          status: 'working',
+          age: '31m 11s',
+          turnStartedAt: now - 1871_000,
+          current: true,
+          turns: 4,
+          cwd: '/home/erfan/easydel-src',
+          host: 'prism-v5p-128_dev_1',
+          branch: 'main',
+          provider: 'antigravity',
+        },
+        {
+          id: 'pin-remote-working',
+          key: 'pin-remote-working',
+          title: 'Update EasyDeL TPU Slice Serving',
+          status: 'working',
+          age: '',
+          turnStartedAt: now - 125_000,
+          current: false,
+          turns: 0,
+          cwd: '/home/erfan/easydel-src',
+          host: 'prism-v5p-1024_2',
+          provider: 'antigravity',
+          contextId: -2,
+        },
+        {
+          id: 'unpinned-ssh',
+          key: 'unpinned-ssh',
+          title: 'Add Inkling 2 to EasyDeL',
+          status: 'idle',
+          age: '42m',
+          current: false,
+          turns: 2,
+          cwd: '/home/erfan/easydel-src',
+          host: 'prism-v5p-128_dev_1',
+          provider: 'claude-code',
+        },
+        {
+          id: 'unpinned-local',
+          key: 'unpinned-local',
+          title: 'Read TPU Setup Script',
+          status: 'idle',
+          age: '1h',
+          current: false,
+          turns: 1,
+          cwd: '/Users/erfan/EasyDeL',
+          host: 'This Mac',
+          provider: 'xerxes',
+          contextId: 1,
+        },
+      ],
+      filter: '',
+      setFilter: () => {},
+      inbox,
+      undo: null,
+      onUndo: () => {},
+      onDismissUndo: () => {},
+      onSetViewMode: () => {},
+      onToggleProjectScope: () => {},
+      onClearProjectScope: () => {},
+      onTogglePin: () => {},
+      onSettle: () => {},
+      onSnooze: () => {},
+      onToggleShelf: () => {},
+      canGoBack: false,
+      canGoForward: false,
+      onGoBack: () => {},
+      onGoForward: () => {},
+      onOpen: () => {},
+      sidebarToggle: createElement('button', { type: 'button' }, 'Toggle'),
+      runtimeStatus: createElement('span', null, 'Connected'),
+    }))
+
+    // All three pinned rows (current, non-current remote working, AND offline cached pin) render with runtime brand logos and status.
+    expect(html).toContain('data-thread-id="thr-active-ssh"')
+    expect(html).toContain('data-thread-id="pin-remote-working"')
+    expect(html).toContain('data-thread-id="pin-offline-agy"')
+    expect(html).toContain('data-thread-status="offline"')
+    expect(html).toContain('Update EasyDeL TPU Slice Serving (offline)')
+    // Non-current remote working thread ticks elapsed duration live (2m 5s / 2m 6s).
+    expect(html).toMatch(/2m [56]s/)
+    // Runtime logos always appear for Antigravity, Claude Code, and Xerxes without clicking into those sessions.
+    expect(html).toContain('data-brand-provider="antigravity"')
+    expect(html).toContain('data-brand-provider="claude-code"')
+    expect(html).toContain('data-brand-provider="xerxes"')
+    // Multi-machine Inbox shows machine name on BOTH Pinned AND unpinned Active rows (including active SSH host and This Mac).
+    expect(html).toContain('· prism-v5p-128_dev_1')
+    expect(html).toContain('· prism-v5p-1024_2')
+    expect(html).toContain('· prism-v5p-1024_3')
+    expect(html).toContain('· This Mac')
+    // Hover Pin action is available even on remote context rows.
+    expect(html).toContain('aria-label="Unpin Update EasyDeL TPU Slice Serving"')
+    expect(html).toContain('aria-label="Pin Read TPU Setup Script"')
+    expect(html.match(HEX_RE) ?? []).toEqual([])
+
+    // Single-machine local-only Inbox keeps `· This Mac` hidden to avoid clutter.
+    const localOnlyHtml = renderToStaticMarkup(createElement(T3Sidebar, {
+      snap: makeSnapshot({ contextHost: undefined, storageScope: 'local' }),
+      page: null,
+      sections: [],
+      allRows: [
+        { id: 'local-1', key: 'local-1', title: 'Local task', status: 'idle', age: '5m', current: true, turns: 1, cwd: '/workspace/Xerxes-Agents', host: 'This Mac', provider: 'xerxes' },
+      ],
+      filter: '',
+      setFilter: () => {},
+      inbox: parseThreadInboxState({ viewMode: 'inbox' }),
+      undo: null,
+      onUndo: () => {},
+      onDismissUndo: () => {},
+      onSetViewMode: () => {},
+      onToggleProjectScope: () => {},
+      onClearProjectScope: () => {},
+      onTogglePin: () => {},
+      onSettle: () => {},
+      onSnooze: () => {},
+      onToggleShelf: () => {},
+      canGoBack: false,
+      canGoForward: false,
+      onGoBack: () => {},
+      onGoForward: () => {},
+      onOpen: () => {},
+      sidebarToggle: createElement('button', { type: 'button' }, 'Toggle'),
+      runtimeStatus: createElement('span', null, 'Connected'),
+    }))
+    expect(localOnlyHtml).not.toContain('· This Mac')
+    expect(localOnlyHtml).toContain('data-brand-provider="xerxes"')
+    expect(localOnlyHtml.match(HEX_RE) ?? []).toEqual([])
   })
 })

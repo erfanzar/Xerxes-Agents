@@ -1910,9 +1910,9 @@ export class DaemonAcpBridgeHost {
       } catch (error) {
         await acceptGate
         if (!accepted || combinedSignal.aborted) return
-        if (isConcurrentPromptRejection(error) && request.onFallbackQueue) {
+        if (request.onFallbackQueue && (isConcurrentPromptRejection(error) || existing.liveSteerTasks.size > 1)) {
           await request.onFallbackQueue()
-        } else if (existing.liveSteerTasks.size <= 1) {
+        } else {
           existing.activeTurnError?.(errorMessage(error))
         }
       }
@@ -4486,12 +4486,12 @@ function isAtLeastSemver(
 function isConcurrentPromptRejection(error: unknown): boolean {
   if (error instanceof AcpRpcError) {
     if (error.code === -32002 || error.code === -32600 || error.code === -32603 || error.code === -32000) {
-      if (/busy|in\s+progress|concurrent|active\s+prompt|already\s+(?:running|active|in\s+progress)|not\s+supported/i.test(error.message)) {
+      if (/busy|in\s+progress|concurrent|active\s+prompt|pending\s+prompt|turn\s+already|already\s+(?:running|active|in\s+progress|steered)|not\s+supported/i.test(error.message)) {
         return true
       }
       if (error.code === -32002) return true
     }
   }
   const msg = errorMessage(error)
-  return /busy|prompt\s+already|in\s+progress|concurrent\s+prompt|already\s+(?:running|active)/i.test(msg)
+  return /busy|prompt\s+already|pending\s+prompt|turn\s+already|in\s+progress|concurrent\s+prompt|already\s+(?:running|active|steered)/i.test(msg)
 }

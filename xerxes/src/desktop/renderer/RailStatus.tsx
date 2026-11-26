@@ -64,8 +64,10 @@ function runningToolOf(snap: Snapshot): ToolItem | null {
   for (let index = snap.blocks.length - 1; index >= 0; index -= 1) {
     const block = snap.blocks[index]
     if (!block || block.kind !== 'tools') continue
-    const running = block.items.find(item => item.state === 'working')
-    if (running) return running
+    for (let itemIndex = block.items.length - 1; itemIndex >= 0; itemIndex -= 1) {
+      const item = block.items[itemIndex]
+      if (item && item.state === 'working') return item
+    }
   }
   return null
 }

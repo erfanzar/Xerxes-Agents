@@ -229,6 +229,8 @@ export interface SavedDaemonSession {
   readonly kind: "main" | "subagent";
   readonly messageCount: number;
   readonly model?: string;
+  readonly acpProvider?: string;
+  readonly acpAgentId?: string;
   readonly parentSessionId?: string;
   readonly path: string;
   /** False while a native child in this daemon still owns the transcript. */
@@ -2623,6 +2625,18 @@ function savedSessionSummary(
   const rootSessionId = nonemptyMetadataString(metadata, "root_session_id");
   const resolvedRootSessionId = rootSessionId ?? parentSessionId;
   const model = nonemptyMetadataString(metadata, "model");
+  const rawAcp = metadata.acp_binding && typeof metadata.acp_binding === "object" && !Array.isArray(metadata.acp_binding)
+    ? (metadata.acp_binding as Record<string, unknown>)
+    : undefined;
+  const rawAcpTransport = rawAcp && typeof rawAcp.transport === "string" ? rawAcp.transport.trim().toLowerCase() : "";
+  const rawAcpAgentId = rawAcp && typeof rawAcp.agent_id === "string" ? rawAcp.agent_id.trim() : "";
+  const rawAcpProvider = rawAcp && typeof rawAcp.provider === "string" ? rawAcp.provider.trim() : "";
+  const isExternalAcp =
+    Boolean(rawAcpAgentId || rawAcpProvider)
+    && rawAcpTransport !== "native"
+    && rawAcpAgentId.toLowerCase() !== "xerxes";
+  const acpProvider = isExternalAcp ? (rawAcpProvider || rawAcpAgentId) : undefined;
+  const acpAgentId = isExternalAcp && rawAcpAgentId ? rawAcpAgentId : undefined;
   const persistedStatus = nonemptyMetadataString(metadata, "status");
   const activeChild = kind === "subagent" && isSubagentConversationActive(transcript.sessionId);
   const status = persistedStatus === "running" && !activeChild ? "interrupted" : persistedStatus;
@@ -2637,6 +2651,8 @@ function savedSessionSummary(
     title: displayTitle(stringValue(metadata.title)),
     agentId: transcript.agentId,
     ...(model ? { model } : {}),
+    ...(acpProvider ? { acpProvider } : {}),
+    ...(acpAgentId ? { acpAgentId } : {}),
     ...(parentSessionId ? { parentSessionId } : {}),
     ...(resolvedRootSessionId
       ? { rootSessionId: resolvedRootSessionId }

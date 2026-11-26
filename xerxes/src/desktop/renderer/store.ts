@@ -1793,9 +1793,11 @@ function clientHandshake(): Record<string, unknown> {
   }
 }
 
-/** Epoch ms from an ISO string or epoch seconds; undefined when unreadable. */
+/** Epoch ms from an ISO string, epoch seconds, or epoch ms; undefined when unreadable. */
 function epochMsOf(when: unknown): number | undefined {
-  if (typeof when === 'number' && Number.isFinite(when)) return when * 1000
+  if (typeof when === 'number' && Number.isFinite(when) && when > 0) {
+    return when > 1e11 ? Math.round(when) : Math.round(when * 1000)
+  }
   if (typeof when === 'string') {
     const parsed = Date.parse(when)
     if (!Number.isNaN(parsed)) return parsed
@@ -1803,17 +1805,12 @@ function epochMsOf(when: unknown): number | undefined {
   return undefined
 }
 
-function ageOf(when: unknown): string {
-  // Saved rows carry updated_at as an ISO string; live rows carry
-  // last_active as epoch seconds. Accept both or show nothing rather than
-  // mislabel.
-  let epoch = typeof when === 'number' && Number.isFinite(when) ? when : NaN
-  if (typeof when === 'string') {
-    const parsed = Date.parse(when)
-    if (!Number.isNaN(parsed)) epoch = parsed / 1000
-  }
-  if (Number.isNaN(epoch)) return ''
-  const minutes = Math.floor((Date.now() - epoch * 1000) / 60_000)
+export function ageOf(when: unknown): string {
+  // Saved rows carry updated_at as an ISO string; live rows carry last_active as
+  // epoch seconds; cached rows carry activeAt as epoch ms. Accept all three cleanly.
+  const ms = epochMsOf(when)
+  if (ms === undefined) return ''
+  const minutes = Math.floor((Date.now() - ms) / 60_000)
   if (minutes < 1) return 'now'
   if (minutes < 60) return `${minutes}m`
   const hours = Math.floor(minutes / 60)
@@ -1885,6 +1882,24 @@ function creatorTraceOf(value: unknown): CreatorTrace | null {
   }
 }
 
+function wireProviderOf(row: Record<string, unknown>): string | undefined {
+  const binding =
+    row.acp_binding && typeof row.acp_binding === 'object' && !Array.isArray(row.acp_binding)
+      ? (row.acp_binding as Record<string, unknown>)
+      : row.saved_acp_binding && typeof row.saved_acp_binding === 'object' && !Array.isArray(row.saved_acp_binding)
+        ? (row.saved_acp_binding as Record<string, unknown>)
+        : null
+  if (binding && str(binding.transport).toLowerCase() === 'native') return undefined
+  const raw =
+    (binding ? (str(binding.provider) || str(binding.agent_id)) : '')
+    || str(row.acp_provider)
+    || str(row.acp_agent_id)
+    || str(row.provider)
+  const clean = raw.trim().toLowerCase()
+  if (!clean || clean === 'xerxes' || clean === 'native') return undefined
+  return clean
+}
+
 const wireRow = (row: Record<string, unknown>, currentId: string): SessionRow | null => {
   const id = str(row.id ?? row.session_id ?? row.key)
   if (!id) return null
@@ -1895,13 +1910,25 @@ const wireRow = (row: Record<string, unknown>, currentId: string): SessionRow | 
   // enrichment below replaces it with a first-message snippet whenever the
   // session is still loaded in the daemon and can answer session.status.
   const hasTitle = Boolean(str(row.title))
+  const status = row.active_turn_id || str(row.status) === 'working' || str(row.status) === 'acting'
+    ? 'working'
+    : str(row.status) || ''
+  const activeAt = epochMsOf(row.updated_at ?? row.last_active)
+  const turnStartedAt = status === 'working'
+    ? (inflightStartedAtMs(row.inflight) ?? epochMsOf(row.turn_started_at))
+    : undefined
+  const provider = wireProviderOf(row)
+  const branch = str(row.branch) || undefined
   return {
     id,
     key: str(row.key) || id,
     title: str(row.title) || `#${id.slice(0, 6)}`,
-    status: str(row.status) || '',
+    status,
     age: ageOf(row.updated_at ?? row.last_active),
-    ...(epochMsOf(row.updated_at ?? row.last_active) === undefined ? {} : { activeAt: epochMsOf(row.updated_at ?? row.last_active)! }),
+    ...(activeAt === undefined ? {} : { activeAt }),
+    ...(turnStartedAt === undefined || turnStartedAt === null ? {} : { turnStartedAt }),
+    ...(provider === undefined ? {} : { provider }),
+    ...(branch === undefined ? {} : { branch }),
     current: id === currentId,
     kind,
     turns,
@@ -1991,6 +2018,57 @@ export function applyInflightTurn(
   for (const block of existingBlocks) {
     if (block.kind === 'tools') {
       for (const item of block.items) if (item.id) existingToolIds.add(item.id)
+    }
+  }
+  // Prefer the daemon's chronological step-by-step in-flight messages when present
+  // so mid-turn live steers stay at the exact point they were sent (never dumped
+  // below a reply that already answered them).
+  if (Array.isArray(record.messages) && record.messages.length > 0) {
+    const chronological = blocksFromStoredMessages(record.messages, {
+      executions: Array.isArray(record.executions) ? record.executions : [],
+      live: true,
+    })
+    for (const block of chronological) {
+      if (block.kind === 'user') {
+        const cleanUser = withoutTurnContext(block.text).trim()
+        if (!cleanUser) continue
+        if (!hydratedUser) hydratedUser = cleanUser
+        if (!builder.snapshot(true).slice(-8).some(item => item.kind === 'user' && item.text === cleanUser)) {
+          builder.pushUser(cleanUser, block.contextSummary === true, block.images)
+        }
+      } else if (block.kind === 'thinking') {
+        if (block.text.trim()) builder.push('think_part', { think: block.text })
+      } else if (block.kind === 'tools') {
+        for (const item of block.items) {
+          if (item.id && existingToolIds.has(item.id)) continue
+          if (item.id) existingToolIds.add(item.id)
+          builder.push('tool_call', {
+            id: item.id,
+            tool_call_id: item.id,
+            name: item.verb,
+            arguments: item.arg,
+            ...(item.title ? { title: item.title } : {}),
+            ...(item.kind ? { kind: item.kind } : {}),
+          })
+          if (item.state !== 'working') {
+            builder.push('tool_result', {
+              id: item.id,
+              tool_call_id: item.id,
+              name: item.verb,
+              ...(item.output ? { return_value: item.output } : {}),
+              ...(item.state === 'failed' ? { error: item.output || 'Tool execution failed.' } : {}),
+              ...(item.diff ? { diff: item.diff } : {}),
+              ...(item.diffs ? { diffs: item.diffs } : {}),
+            })
+          }
+        }
+      } else if (block.kind === 'agent') {
+        if (block.text) builder.push('text_part', { text: block.text })
+      }
+    }
+    return {
+      ...(hydratedUser ? { user: hydratedUser } : {}),
+      ...(startedAtMs !== null ? { startedAtMs } : {}),
     }
   }
   if (rawUser && !isLegacyHarnessPrompt(rawUser)) {
@@ -4024,13 +4102,19 @@ export class Store {
         this.patch({ stopArmed: false })
       }
       // Antigravity (`agy acp 1.5+`) supports native live mid-turn steering via
-      // `turn.steer({ live: true })`. Never send `turn.cancel` before trying live
-      // steer — cancelling a mid-step `agy` tool call can corrupt the trajectory.
-      // Skip live steer when promoting an already-queued durable steer so
-      // `turn.cancel({ drop_pending_steers: true })` removes it atomically.
+      // `turn.steer({ live: true })` while generating/thinking. However, when a
+      // foreground tool call is actively blocking (e.g., a long shell/SSH run),
+      // an explicit `Steer now` (`⌘⏎`) must interrupt via `turn.cancel` +
+      // `turn.submit` so the user isn't trapped behind a blocked command. Plain
+      // `Enter` (`steer()`) continues to send non-destructive live steers.
+      const snapshotBlocks = this.builder.snapshot(true)
+      const hasRunningTool = snapshotBlocks.some(
+        block => block.kind === 'tools' && block.items.some(item => item.state === 'working'),
+      )
       if (
         !options?.promotedFromQueue &&
         !hadPendingInteraction &&
+        !hasRunningTool &&
         this.frame.acpBinding?.connected &&
         this.frame.acpBinding.provider === 'antigravity'
       ) {
@@ -4080,7 +4164,7 @@ export class Store {
         this.patch({ approval: null, question: null })
       }
       await this.bridge.call('turn.cancel', { session_key: sessionKey, drop_pending_steers: true })
-      const settled = await this.waitForTurnState(sessionKey, false, 4500)
+      const settled = await this.waitForTurnState(sessionKey, false, 8000)
       if (this.sessionKey !== sessionKey) return false
       if (!settled) {
         if (options?.promotedFromQueue) {
@@ -7369,9 +7453,23 @@ export class Store {
       // An untitled 0-turn live row is an empty shell — a session some client
       // opened and never spoke in. It is not a task; listing it as one is how
       // the sidebar filled with "0 turns" ghosts.
-      const live = all.filter(
-        row => row.kind === 'main' && row.id !== currentId && !(row.turns === 0 && row.untitled),
-      )
+      const savedById = new Map((savedRows ?? []).map(row => [row.id, row]))
+      const live = all
+        .filter(row => row.kind === 'main' && row.id !== currentId && !(row.turns === 0 && row.untitled))
+        .map(row => {
+          const savedRow = savedById.get(row.id)
+          if (!savedRow) return row
+          const provider = row.provider ?? savedRow.provider
+          const branch = row.branch ?? savedRow.branch
+          const activeAt = row.activeAt ?? savedRow.activeAt
+          if (provider === row.provider && branch === row.branch && activeAt === row.activeAt) return row
+          return {
+            ...row,
+            ...(provider !== undefined ? { provider } : {}),
+            ...(branch !== undefined ? { branch } : {}),
+            ...(activeAt !== undefined ? { activeAt } : {}),
+          }
+        })
       // Fleet comes from the parent's subagent_snapshots (adoptFleet) —
       // active_list only holds client-opened sessions and would blank the
       // panel while subagents actually run.
